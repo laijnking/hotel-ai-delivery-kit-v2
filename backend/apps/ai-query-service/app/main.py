@@ -565,6 +565,191 @@ WHERE {" AND ".join(where_clauses)}
 '''.strip()
 
 
+def build_portfolio_breakdown(
+    metric_def: dict,
+    parsed: dict,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> list[dict]:
+    detail_sql = build_sql(
+        metric_def,
+        parsed,
+        allowed_hotels,
+        requested_hotels,
+        requested_areas,
+    )
+    try:
+        detail_result = request_json(
+            "POST",
+            f"{DB_EXECUTOR_SERVICE_URL}/api/v1/db/query",
+            {"sql": detail_sql},
+            stage="db-executor-portfolio-breakdown",
+        )
+    except HTTPException:
+        return []
+    detail_rows = detail_result.get("rows", [])
+    if not isinstance(detail_rows, list):
+        return []
+    return detail_rows[:5]
+
+
+def _unique_non_empty(rows: list[dict], key: str) -> list[str]:
+    values: list[str] = []
+    for row in rows:
+        item = str(row.get(key) or "").strip()
+        if item and item not in values:
+            values.append(item)
+    return values
+
+
+def build_portfolio_benchmark_sql(metric_def: dict, parsed: dict, breakdown_rows: list[dict]) -> str | None:
+    if not breakdown_rows:
+        return None
+    source_table = safe_identifier(str(metric_def.get("source_table", "wddm_dim_overview_cockpit_f")), "source_table")
+    if source_table not in _OVERVIEW_SOURCE_TABLES:
+        return None
+    query_parts = build_overview_query_parts(source_table)
+    time_scope = str(parsed.get("time_scope", "")).strip()
+    if not _TIME_SCOPE_RE.fullmatch(time_scope):
+        return None
+
+    areas = _unique_non_empty(breakdown_rows, "area")
+    brand_levels = _unique_non_empty(breakdown_rows, "brand_level")
+    city_levels = _unique_non_empty(breakdown_rows, "city_level")
+    group_hotels = _unique_non_empty(breakdown_rows, "hotel_name")
+
+    where_clauses = [f"{query_parts['time_field']} = {sql_literal(time_scope)}"]
+    if areas:
+        where_clauses.append(f"{query_parts['area_filter']} IN ({', '.join(sql_literal(item) for item in areas)})")
+    if brand_levels:
+        where_clauses.append(f"{query_parts['brand_level_filter']} IN ({', '.join(sql_literal(item) for item in brand_levels)})")
+    if city_levels:
+        where_clauses.append(f"{query_parts['city_level_filter']} IN ({', '.join(sql_literal(item) for item in city_levels)})")
+    hotel_exclusion = hotel_scope_clause(query_parts.get("hotel_search_filter", query_parts["hotel_filter"]), group_hotels)
+    if hotel_exclusion:
+        where_clauses.append(f"NOT {hotel_exclusion}")
+
+    prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
+    cost_total = " + ".join(
+        [
+            f"COALESCE({prefix}PEOPLE_COST_MTD_A, 0)",
+            f"COALESCE({prefix}ENERGY_EXPENSES_MTD_A, 0)",
+            f"COALESCE({prefix}RESTAURANT_COST_MTD_A, 0)",
+            f"COALESCE({prefix}ROOM_COST_MTD_A, 0)",
+            f"COALESCE({prefix}ADMINI_EXPENSES_MTD_A, 0)",
+        ]
+    )
+    return f'''
+SELECT
+  COUNT(*) AS peer_count,
+  AVG({prefix}TOTAL_INCOME_MTD_A) AS avg_total_income,
+  AVG({prefix}INCOME_PER_ROOM_MTD_A) AS avg_revpar,
+  AVG({prefix}OPERATING_PROFIT_MTD_A) AS avg_operating_profit,
+  AVG({prefix}OPERATING_PROFIT_MTD_A / NULLIF({prefix}TOTAL_INCOME_MTD_A, 0)) AS avg_profit_margin,
+  AVG(({cost_total}) / NULLIF({prefix}TOTAL_INCOME_MTD_A, 0)) AS avg_cost_rate
+FROM {query_parts["from_clause"]}
+WHERE {" AND ".join(where_clauses)}
+'''.strip()
+
+
+def build_portfolio_internal_benchmark(rows: list[dict], breakdown_rows: list[dict], metric_def: dict, parsed: dict) -> dict[str, object] | None:
+    if not rows or not breakdown_rows:
+        return None
+    benchmark_sql = build_portfolio_benchmark_sql(metric_def, parsed, breakdown_rows)
+    if not benchmark_sql:
+        return None
+    benchmark_result = request_json(
+        "POST",
+        f"{DB_EXECUTOR_SERVICE_URL}/api/v1/db/query",
+        {"sql": benchmark_sql},
+        stage="db-executor-portfolio-benchmark",
+    )
+    benchmark_rows = benchmark_result.get("rows", [])
+    if not isinstance(benchmark_rows, list) or not benchmark_rows:
+        return None
+    benchmark = benchmark_rows[0]
+    peer_count = benchmark.get("peer_count")
+    if not isinstance(peer_count, (int, float)) or int(peer_count) <= 0:
+        return None
+    current = rows[0]
+    total_income = current.get("total_income_actual")
+    operating_profit = current.get("operating_profit_actual")
+    return {
+        "peer_count": int(peer_count),
+        "scope_used": "组合同区域同档次样本",
+        "scope": {
+            "area": " / ".join(_unique_non_empty(breakdown_rows, "area")),
+            "brand_level": " / ".join(_unique_non_empty(breakdown_rows, "brand_level")),
+            "city_level": " / ".join(_unique_non_empty(breakdown_rows, "city_level")),
+        },
+        "current": {
+            "hotel_name": current.get("hotel_name"),
+            "total_income": total_income,
+            "revpar": current.get("revpar_actual"),
+            "operating_profit": operating_profit,
+            "profit_margin": (
+                (operating_profit / total_income)
+                if isinstance(total_income, (int, float)) and total_income not in (0, 0.0) and isinstance(operating_profit, (int, float))
+                else None
+            ),
+            "cost_rate": (
+                (
+                    sum(
+                        value
+                        for value in [
+                            current.get("people_cost_actual"),
+                            current.get("energy_expenses_actual"),
+                            current.get("restaurant_cost_actual"),
+                            current.get("room_cost_actual"),
+                            current.get("admin_expenses_actual"),
+                        ]
+                        if isinstance(value, (int, float))
+                    )
+                    / total_income
+                )
+                if isinstance(total_income, (int, float)) and total_income not in (0, 0.0)
+                else None
+            ),
+        },
+        "peer_avg": {
+            "total_income": benchmark.get("avg_total_income"),
+            "revpar": benchmark.get("avg_revpar"),
+            "operating_profit": benchmark.get("avg_operating_profit"),
+            "profit_margin": benchmark.get("avg_profit_margin"),
+            "cost_rate": benchmark.get("avg_cost_rate"),
+        },
+    }
+
+
+def build_portfolio_outliers(rows: list[dict]) -> dict[str, dict[str, object]] | None:
+    if not rows:
+        return None
+
+    def pick_max(items: list[dict], key: str) -> dict | None:
+        valid = [item for item in items if isinstance(item.get(key), (int, float))]
+        return max(valid, key=lambda item: item.get(key)) if valid else None
+
+    def pick_min(items: list[dict], key: str) -> dict | None:
+        valid = [item for item in items if isinstance(item.get(key), (int, float))]
+        return min(valid, key=lambda item: item.get(key)) if valid else None
+
+    return {
+        "income": {
+            "best": pick_max(rows, "diff_value"),
+            "worst": pick_min(rows, "diff_value"),
+        },
+        "profit": {
+            "best": pick_max(rows, "operating_profit_actual"),
+            "worst": pick_min(rows, "operating_profit_actual"),
+        },
+        "cost": {
+            "best": pick_min(rows, "people_cost_actual"),
+            "worst": pick_max(rows, "people_cost_actual"),
+        },
+    }
+
+
 def build_explain_sql(
     parsed: dict,
     allowed_hotels: list[str] | None = None,
@@ -829,6 +1014,103 @@ def build_external_benchmark_stub(parsed: dict, internal_benchmark: dict[str, ob
     }
 
 
+def shift_month_label(time_scope: str | None, offset: int) -> str | None:
+    text = str(time_scope or "").strip()
+    if not re.fullmatch(r"\d{6}", text):
+        return None
+    year = int(text[:4])
+    month = int(text[4:6])
+    month_index = (year * 12 + (month - 1)) + offset
+    target_year = month_index // 12
+    target_month = month_index % 12 + 1
+    return f"{target_year}年{target_month}月"
+
+
+def build_quick_filters(parsed: dict, rows: list[dict], portfolio_breakdown: list[dict]) -> list[dict[str, object]]:
+    display_rows = portfolio_breakdown or rows
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    query_object_label = str(query_plan.get("query_object_label") or "").strip()
+
+    def unique_values(values: list[object], limit: int = 3) -> list[str]:
+        items: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in items:
+                continue
+            items.append(text)
+            if len(items) >= limit:
+                break
+        return items
+
+    areas = unique_values(list(parsed.get("requested_areas", [])) + [row.get("area") for row in display_rows])
+    hotels = unique_values(
+        [
+            row.get("hotel_name")
+            for row in display_rows
+            if str(row.get("hotel_name") or "").strip() and str(row.get("hotel_name") or "").strip() != query_object_label
+        ]
+    )
+    brands = unique_values(list(parsed.get("requested_brand_children", [])) + [row.get("brand_child") for row in display_rows])
+    months = unique_values(
+        [
+            shift_month_label(parsed.get("time_scope"), -1),
+            shift_month_label(parsed.get("time_scope"), 0),
+            shift_month_label(parsed.get("time_scope"), 1),
+        ]
+    )
+    compare_mode = str(parsed.get("compare_mode") or "actual").strip()
+    analysis_mode = str(query_plan.get("analysis_mode") or "").strip()
+    compare_items = [
+        item
+        for item in [
+            {"label": "预算对比", "prompt": "切换成预算对比", "active": compare_mode == "budget"},
+            {"label": "同比变化", "prompt": "切换成同比变化", "active": compare_mode == "yoy"},
+            {"label": "实际表现", "prompt": "切换成实际表现", "active": compare_mode == "actual"},
+        ]
+        if not item["active"]
+    ][:2]
+    mode_items = [
+        item
+        for item in [
+            {"label": "组合总览", "prompt": "改看组合总览", "active": analysis_mode == "portfolio_overview"},
+            {"label": "归因分析", "prompt": "继续展开原因", "active": analysis_mode == "driver_analysis"},
+            {"label": "经营摘要", "prompt": "换成经营摘要", "active": analysis_mode == "management_report"},
+        ]
+        if not item["active"]
+    ][:2]
+    groups_by_label = {
+        "区域": {"label": "区域", "items": [{"label": item, "prompt": f"只看{item}"} for item in areas]},
+        "酒店": {"label": "酒店", "items": [{"label": item, "prompt": f"只看{item}"} for item in hotels]},
+        "月份": {"label": "月份", "items": [{"label": item, "prompt": f"切到{item}"} for item in months]},
+        "品牌": {"label": "品牌", "items": [{"label": item, "prompt": f"只看{item}品牌"} for item in brands]},
+        "口径": {"label": "口径", "items": [{"label": item["label"], "prompt": item["prompt"]} for item in compare_items]},
+        "分析方式": {"label": "分析方式", "items": [{"label": item["label"], "prompt": item["prompt"]} for item in mode_items]},
+    }
+
+    object_type = str(query_plan.get("query_object_type") or "").strip()
+    requested_hotels = parsed.get("requested_hotels") if isinstance(parsed.get("requested_hotels"), list) else []
+    requested_areas = parsed.get("requested_areas") if isinstance(parsed.get("requested_areas"), list) else []
+    is_single_hotel = object_type == "single_hotel" or (len(requested_hotels) == 1 and query_plan.get("query_grain") != "portfolio")
+    is_area_scope = object_type == "area_scope" or bool(requested_areas)
+    is_portfolio = query_plan.get("query_grain") == "portfolio" or object_type in {"hotel_group", "manage_corp_scope", "brand_scope"}
+
+    if is_single_hotel:
+        template = ["月份", "口径", "分析方式", "品牌", "区域"]
+    elif is_area_scope and not is_single_hotel:
+        template = ["酒店", "品牌", "月份", "分析方式", "口径"]
+    elif is_portfolio:
+        template = ["区域", "品牌", "酒店", "分析方式", "月份", "口径"]
+    else:
+        template = ["月份", "口径", "分析方式", "区域", "酒店", "品牌"]
+
+    ordered_groups = [groups_by_label[label] for label in template if groups_by_label.get(label, {}).get("items")]
+    remaining_groups = [
+        group for label, group in groups_by_label.items()
+        if label not in template and group.get("items")
+    ]
+    return ordered_groups + remaining_groups
+
+
 @app.post("/api/v1/ai/query")
 def ai_query(payload: QueryRequest):
     request_started = time.perf_counter()
@@ -957,8 +1239,31 @@ def ai_query(payload: QueryRequest):
             status_code=502,
             detail={"trace_id": trace_id, "stage": "db-executor", "message": "invalid rows payload"},
         )
+    if query_plan.get("query_grain") == "portfolio" and rows:
+        first_portfolio_row = rows[0] if isinstance(rows[0], dict) else {}
+        if int(first_portfolio_row.get("portfolio_member_count") or 0) <= 0:
+            rows = []
     row_count = len(rows)
     internal_benchmark = None
+    portfolio_breakdown: list[dict] = []
+    portfolio_outliers: dict[str, dict[str, object]] | None = None
+    if query_plan.get("query_grain") == "portfolio" and resolved_requested_hotels:
+        try:
+            portfolio_breakdown = build_portfolio_breakdown(
+                metric_def,
+                parsed,
+                auth_scope.get("allowed_hotels", []),
+                resolved_requested_hotels,
+                parsed.get("requested_areas", []),
+            )
+        except HTTPException as exc:
+            warnings.append(f"portfolio breakdown fallback: {exc.detail}")
+        portfolio_outliers = build_portfolio_outliers(portfolio_breakdown)
+        if rows and portfolio_breakdown:
+            try:
+                internal_benchmark = build_portfolio_internal_benchmark(rows, portfolio_breakdown, metric_def, parsed)
+            except HTTPException as exc:
+                warnings.append(f"portfolio benchmark fallback: {exc.detail}")
     if parsed.get("intent") != "explain" and rows and query_plan.get("query_grain") != "portfolio":
         try:
             internal_benchmark = build_internal_benchmark(rows, metric_def, parsed)
@@ -976,6 +1281,8 @@ def ai_query(payload: QueryRequest):
                 "question": payload.question,
                 "parsed_intent": parsed,
                 "rows": rows,
+                "portfolio_breakdown": portfolio_breakdown,
+                "portfolio_outliers": portfolio_outliers,
                 "peer_benchmark": internal_benchmark,
                 "external_benchmark_requested": payload.context.external_benchmark,
             },
@@ -1036,6 +1343,12 @@ def ai_query(payload: QueryRequest):
         warnings.append(f"audit fallback: {exc.detail}")
 
     timings["total_ms"] = elapsed_ms(request_started)
+    portfolio_member_count = None
+    if rows and isinstance(rows[0], dict):
+        portfolio_member_count = rows[0].get("portfolio_member_count")
+    if portfolio_member_count in (None, "", 0) and isinstance(parsed.get("query_plan"), dict):
+        portfolio_member_count = parsed["query_plan"].get("resolved_hotel_count")
+    quick_filters = build_quick_filters(parsed, rows, portfolio_breakdown)
 
     return {
         "trace_id": trace_id,
@@ -1046,6 +1359,10 @@ def ai_query(payload: QueryRequest):
         "auth_scope": auth_scope,
         "data_source": data_source,
         "data_points": rows,
+        "portfolio_member_count": portfolio_member_count,
+        "portfolio_breakdown": portfolio_breakdown,
+        "portfolio_outliers": portfolio_outliers,
+        "quick_filters": quick_filters,
         "internal_benchmark": internal_benchmark,
         "external_benchmark": external_benchmark,
         "external_benchmark_requested": payload.context.external_benchmark,

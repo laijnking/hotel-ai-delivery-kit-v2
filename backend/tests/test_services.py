@@ -365,6 +365,63 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("SUM(o.TOTAL_INCOME_MTD_A) AS total_income_actual", sql)
         self.assertIn("SUM(o.OPERATING_PROFIT_MTD_A) AS actual_value", sql)
 
+    @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
+    def test_metric_response_uses_portfolio_breakdown_for_group_overview(self):
+        req = explanation_main.Req(
+            question="查一下2024年2月富力所有酒店的总体经营情况",
+            parsed_intent={
+                "metric_code": "OPERATING_PROFIT",
+                "intent": "query",
+                "compare_mode": "budget",
+                "query_plan": {
+                    "query_object_type": "hotel_group",
+                    "query_object_label": "富力体系酒店集合",
+                    "query_grain": "portfolio",
+                    "analysis_mode": "portfolio_overview",
+                },
+            },
+            rows=[{
+                "hotel_name": "富力体系酒店集合",
+                "portfolio_member_count": 7,
+                "actual_value": -147636.58,
+                "compare_value": 0.0,
+                "diff_value": -147636.58,
+                "diff_rate": None,
+                "total_income_actual": 1200000.0,
+                "room_income_actual": 800000.0,
+                "restaurant_income_actual": 250000.0,
+                "banquet_income_actual": 50000.0,
+                "operating_profit_actual": -147636.58,
+                "people_cost_actual": 300000.0,
+                "energy_expenses_actual": 80000.0,
+                "restaurant_cost_actual": 120000.0,
+                "room_cost_actual": 60000.0,
+                "admin_expenses_actual": 50000.0,
+            }],
+            portfolio_breakdown=[
+                {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "actual_value": 500000, "compare_value": 400000, "diff_value": 100000, "diff_rate": 0.25},
+                {"hotel_name": "镇江富力喜来登酒店", "actual_value": -200000, "compare_value": 0, "diff_value": -200000, "diff_rate": None},
+            ],
+            portfolio_outliers={
+                "income": {
+                    "best": {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "diff_value": 100000},
+                    "worst": {"hotel_name": "镇江富力喜来登酒店", "diff_value": -200000},
+                },
+                "profit": {
+                    "best": {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "operating_profit_actual": 260000},
+                    "worst": {"hotel_name": "镇江富力喜来登酒店", "operating_profit_actual": -300000},
+                },
+                "cost": {
+                    "worst": {"hotel_name": "镇江富力喜来登酒店", "people_cost_actual": 180000},
+                },
+            },
+        )
+        result = explanation_main.explain(req)
+        self.assertIn("组合样本 7 家", result["summary"])
+        self.assertIn("拉动较强的是 广州富力丽思卡尔顿酒店及公寓", result["summary"])
+        self.assertIn("人工成本偏高的是 镇江富力喜来登酒店", result["summary"])
+        self.assertIn("广州富力丽思卡尔顿酒店及公寓", " ".join(result["weakest_hotels"]))
+
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_external_benchmark_stub_returns_provider_metadata(self):
         result = ai_query_main.build_external_benchmark_stub(
@@ -535,6 +592,82 @@ class ServiceSmokeTests(unittest.TestCase):
     def test_eval_harness_semantic_sql_cases_pass(self):
         failed_count, results = eval_runner.run_eval(eval_runner.DEFAULT_CASES)
         self.assertEqual(failed_count, 0, [item for item in results if not item["passed"]])
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_quick_filters_reflects_scope_brand_compare_and_mode(self):
+        result = ai_query_main.build_quick_filters(
+            {
+                "time_scope": "202402",
+                "compare_mode": "budget",
+                "requested_areas": ["华南区"],
+                "requested_brand_children": ["万豪"],
+                "query_plan": {
+                    "query_object_label": "富力体系酒店集合",
+                    "analysis_mode": "portfolio_overview",
+                },
+            },
+            [{"hotel_name": "富力体系酒店集合"}],
+            [
+                {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "area": "华南区", "brand_child": "万豪"},
+                {"hotel_name": "镇江富力喜来登酒店", "area": "华东区", "brand_child": "万豪"},
+            ],
+        )
+        labels = [item["label"] for item in result]
+        self.assertIn("区域", labels)
+        self.assertIn("酒店", labels)
+        self.assertIn("月份", labels)
+        self.assertIn("品牌", labels)
+        self.assertIn("口径", labels)
+        self.assertIn("分析方式", labels)
+        flattened = " ".join(str(option["label"]) for group in result for option in group["items"])
+        self.assertIn("万豪", flattened)
+        self.assertIn("同比变化", flattened)
+        self.assertIn("经营摘要", flattened)
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_quick_filters_prefers_single_hotel_template(self):
+        result = ai_query_main.build_quick_filters(
+            {
+                "time_scope": "202402",
+                "compare_mode": "budget",
+                "requested_hotels": ["广州富力丽思卡尔顿酒店及公寓"],
+                "requested_brand_children": ["万豪"],
+                "query_plan": {
+                    "query_object_type": "single_hotel",
+                    "query_object_label": "广州富力丽思卡尔顿酒店及公寓",
+                    "query_grain": "hotel",
+                    "analysis_mode": "hotel_metric_snapshot",
+                },
+            },
+            [{"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "area": "华南区", "brand_child": "万豪"}],
+            [],
+        )
+        labels = [item["label"] for item in result]
+        self.assertEqual(labels[:4], ["月份", "口径", "分析方式", "品牌"])
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_quick_filters_prefers_area_template(self):
+        result = ai_query_main.build_quick_filters(
+            {
+                "time_scope": "202402",
+                "compare_mode": "budget",
+                "requested_areas": ["华南区"],
+                "requested_brand_children": ["万豪"],
+                "query_plan": {
+                    "query_object_type": "area_scope",
+                    "query_object_label": "华南区",
+                    "query_grain": "comparison",
+                    "analysis_mode": "hotel_metric_snapshot",
+                },
+            },
+            [
+                {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "area": "华南区", "brand_child": "万豪"},
+                {"hotel_name": "江门嘉华酒店", "area": "华南区", "brand_child": "嘉华"},
+            ],
+            [],
+        )
+        labels = [item["label"] for item in result]
+        self.assertEqual(labels[:4], ["酒店", "品牌", "月份", "分析方式"])
 
 
 if __name__ == "__main__":

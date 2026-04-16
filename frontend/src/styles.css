@@ -453,6 +453,26 @@ button {
   gap: 8px;
 }
 
+.quick-filter-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.inline-followup-filters {
+  margin-bottom: 4px;
+}
+
+.quick-filter-group {
+  display: grid;
+  gap: 8px;
+}
+
+.quick-filter-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+}
+
 .benchmark-card {
   padding: 14px;
   border-radius: 18px;
@@ -521,6 +541,12 @@ button {
   margin-top: 0;
 }
 
+.chip-secondary {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(148, 163, 184, 0.24);
+  color: #0f172a;
+}
+
 .subtle-card {
   background: rgba(255, 255, 255, 0.72);
 }
@@ -566,6 +592,39 @@ button {
   white-space: pre-wrap;
 }
 
+.outlier-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.outlier-card {
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #f8fafc, #fefce8);
+  border: 1px solid #d8e6e6;
+}
+
+.outlier-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+
+.outlier-line {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #334155;
+}
+
+.outlier-line.positive {
+  color: #0f766e;
+}
+
+.outlier-line.negative {
+  color: #b45309;
+}
+
 .details-card {
   border-radius: 16px;
   background: #fbfdfc;
@@ -581,6 +640,24 @@ button {
 
 .details-card[open] summary {
   margin-bottom: 10px;
+}
+
+.analysis-details-card {
+  background: linear-gradient(135deg, #fbfdfc, #f8fafc);
+}
+
+.analysis-details-card summary {
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.follow-up-details-card {
+  background: linear-gradient(135deg, #fbfdfc, #f8fafc);
+}
+
+.follow-up-details-card summary {
+  font-size: 14px;
+  color: #0f172a;
 }
 
 .diagnostic-card {

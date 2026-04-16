@@ -440,3 +440,36 @@ sequenceDiagram
 - 学习闭环只能产生候选改进，不能直接改线上逻辑。
 
 如果按这个架构推进，系统会从“会匹配的问答系统”逐步升级成“会理解、会规划、会分析、还能持续学习的经营分析助手”。
+
+## 13. 第一阶段已落地内容
+
+当前代码已经落地了第一阶段的最小骨架：
+
+- `semantic-service`
+  - 新增 `resolved_entities`
+  - 新增 `query_plan`
+  - 已支持把“富力所有酒店”这类表达解析为 `hotel_group`
+  - 已支持输出 `query_object_type / query_object_label / query_grain / analysis_mode / themes / execution_order`
+
+- `ai-query-service`
+  - 已支持读取 `query_plan`
+  - 已支持当 `query_grain=portfolio` 时走组合汇总 SQL
+  - 已支持读取 `resolved_entities.hotel_group.member_hotels` 作为组合成员
+  - 已对“空聚合行”做空结果兜底
+
+- `frontend`
+  - 已开始展示 `query_plan.query_object_label`
+  - 已把识别范围与分析模式放进结果识别卡
+
+这意味着系统已经从“只会按酒店/区域做浅层匹配”迈出了第一步，开始显式区分：
+
+- 单酒店问题
+- 酒店集合问题
+- 组合总览问题
+
+后续第二阶段应继续补：
+
+- 组合查询的异常酒店下钻
+- 组合结果的内部对标
+- 更自然的分析模式中文映射
+- 更完整的语义图谱对象类型

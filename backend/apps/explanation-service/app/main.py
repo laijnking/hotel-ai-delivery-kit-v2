@@ -20,6 +20,8 @@ class Req(BaseModel):
     question: str
     parsed_intent: dict[str, Any]
     rows: list[dict[str, Any]]
+    portfolio_breakdown: list[dict[str, Any]] = []
+    portfolio_outliers: dict[str, Any] | None = None
     peer_benchmark: dict[str, Any] | None = None
     external_benchmark_requested: bool = False
 
@@ -28,6 +30,8 @@ class ReportReq(BaseModel):
     question: str
     parsed_intent: dict[str, Any]
     rows: list[dict[str, Any]]
+    portfolio_breakdown: list[dict[str, Any]] = []
+    portfolio_outliers: dict[str, Any] | None = None
     peer_benchmark: dict[str, Any] | None = None
     external_benchmark_requested: bool = False
 
@@ -291,6 +295,47 @@ def _format_hotel_row(row: dict[str, Any]) -> str:
     return f"{hotel_name}：实际 {actual_value}，对比 {compare_value}，差额 {diff_value}，差异率 {diff_rate}"
 
 
+def _portfolio_breakdown_text(rows: list[dict[str, Any]]) -> str | None:
+    valid_rows = _valid_diff_rows(rows)
+    if not valid_rows:
+        return None
+    best = max(valid_rows, key=lambda item: item.get("diff_value") if isinstance(item.get("diff_value"), (int, float)) else -10**12)
+    worst = min(valid_rows, key=lambda item: item.get("diff_value") if isinstance(item.get("diff_value"), (int, float)) else 10**12)
+    return (
+        f"组合内拉动较强的是 {best.get('hotel_name')}（差额 {_format_amount(best.get('diff_value'))}，差异率 {_format_percent(best.get('diff_rate'))}）；"
+        f"拖累较明显的是 {worst.get('hotel_name')}（差额 {_format_amount(worst.get('diff_value'))}，差异率 {_format_percent(worst.get('diff_rate'))}）。"
+    )
+
+
+def _portfolio_outlier_text(outliers: dict[str, Any] | None) -> str | None:
+    if not isinstance(outliers, dict):
+        return None
+
+    def hotel_line(bucket: str, side: str, label: str) -> str | None:
+        item = outliers.get(bucket, {}).get(side) if isinstance(outliers.get(bucket), dict) else None
+        if not isinstance(item, dict):
+            return None
+        hotel_name = item.get("hotel_name")
+        if not hotel_name:
+            return None
+        if bucket == "cost":
+            value = _format_amount(item.get("people_cost_actual"))
+            return f"{label}{hotel_name}（人工成本 {_format_amount(item.get('people_cost_actual'))}）"
+        if bucket == "profit":
+            return f"{label}{hotel_name}（经营利润 {_format_amount(item.get('operating_profit_actual'))}）"
+        return f"{label}{hotel_name}（差额 {_format_amount(item.get('diff_value'))}）"
+
+    lines = [
+        hotel_line("income", "best", "收入拉动较强的是 "),
+        hotel_line("income", "worst", "收入拖累较明显的是 "),
+        hotel_line("profit", "best", "利润表现较强的是 "),
+        hotel_line("profit", "worst", "利润承压较明显的是 "),
+        hotel_line("cost", "worst", "人工成本偏高的是 "),
+    ]
+    lines = [item for item in lines if item]
+    return "；".join(lines) + "。" if lines else None
+
+
 def _build_explain_response(metric: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     top_rows = rows[:3]
     if not top_rows:
@@ -334,6 +379,8 @@ def _build_metric_response(
     metric: str,
     rows: list[dict[str, Any]],
     parsed_intent: dict[str, Any] | None = None,
+    portfolio_breakdown: list[dict[str, Any]] | None = None,
+    portfolio_outliers: dict[str, Any] | None = None,
     peer_benchmark: dict[str, Any] | None = None,
     external_benchmark_requested: bool = False,
 ) -> dict[str, Any]:
@@ -349,19 +396,33 @@ def _build_metric_response(
     negative_rows = [row for row in valid_rows if (row.get("diff_value") if isinstance(row.get("diff_value"), (int, float)) else row.get("diff_rate") or 0) < 0]
     positive_rows = [row for row in valid_rows if (row.get("diff_value") if isinstance(row.get("diff_value"), (int, float)) else row.get("diff_rate") or 0) > 0]
     first = ranked_rows[0]
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
     diff_rate = _format_percent(first.get("diff_rate"))
     hotel_name = first.get("hotel_name", "某酒店")
     actual_value = _format_amount(first.get("actual_value"))
     compare_value = _format_amount(first.get("compare_value"))
     diff_value = _format_amount(first.get("diff_value"))
     peer_insight = _build_peer_insight(rows)
+    portfolio_insight = _portfolio_breakdown_text(portfolio_breakdown or [])
+    outlier_text = _portfolio_outlier_text(portfolio_outliers)
     direction_text = _direction_label(parsed_intent or {})
-    summary = (
-        f"当前仅基于 {metric_name} 的实际值、对比值、差额和差异率做客观拆解；"
-        f"共返回 {len(rows)} 家酒店，样本首项为 {hotel_name}，差额 {diff_value}，差异率约 {diff_rate}。"
-    )
+    if query_plan.get("query_grain") == "portfolio":
+        member_count = first.get("portfolio_member_count")
+        summary = (
+            f"当前已按 {query_plan.get('query_object_label') or hotel_name} 做组合汇总拆解；"
+            f"本次组合样本 {member_count or 'N/A'} 家，组合层面的差额 {diff_value}，差异率约 {diff_rate}。"
+        )
+    else:
+        summary = (
+            f"当前仅基于 {metric_name} 的实际值、对比值、差额和差异率做客观拆解；"
+            f"共返回 {len(rows)} 家酒店，样本首项为 {hotel_name}，差额 {diff_value}，差异率约 {diff_rate}。"
+        )
     if peer_insight:
         summary = f"{summary} {peer_insight}"
+    if portfolio_insight:
+        summary = f"{summary} {portfolio_insight}"
+    if outlier_text:
+        summary = f"{summary} {outlier_text}"
     key_points = [
         f"重点酒店：{hotel_name}",
         f"实际值：{actual_value}",
@@ -370,13 +431,15 @@ def _build_metric_response(
         f"口径说明：差额 = {direction_text}；正数通常代表高于对比口径，负数通常代表低于对比口径。",
     ]
     weakest = [_format_hotel_row(row) for row in ranked_rows[:5]]
+    if portfolio_breakdown:
+        weakest = [_format_hotel_row(row) for row in (portfolio_breakdown or [])[:5]]
     if _has_overview_context(first):
         risks = [
             _build_income_quality_text(first),
             _build_room_efficiency_text(first),
             _build_profit_quality_text(first),
             _build_cost_efficiency_text(first),
-            _build_benchmark_text(first, peer_insight, peer_benchmark, external_benchmark_requested),
+            _build_benchmark_text(first, outlier_text or portfolio_insight or peer_insight, peer_benchmark, external_benchmark_requested),
         ]
     else:
         risks = [
@@ -392,6 +455,7 @@ def _build_metric_response(
     return {
         "summary": summary,
         "key_points": key_points,
+        "weakest_hotels": weakest,
         "risks": risks,
         "suggestions": suggestions,
         "report_sections": _build_executive_sections(summary, risks, suggestions),
@@ -507,7 +571,7 @@ def explain(payload: Req):
     rows = payload.rows or []
     metric = payload.parsed_intent.get("metric_code", "指标")
     intent = payload.parsed_intent.get("intent", "query")
-    result = _build_explain_response(metric, rows) if intent == "explain" else _build_metric_response(metric, rows, payload.parsed_intent, payload.peer_benchmark, payload.external_benchmark_requested)
+    result = _build_explain_response(metric, rows) if intent == "explain" else _build_metric_response(metric, rows, payload.parsed_intent, payload.portfolio_breakdown, payload.portfolio_outliers, payload.peer_benchmark, payload.external_benchmark_requested)
     return _apply_llm_enhancement(payload.question, payload.parsed_intent, rows, result)
 
 
@@ -515,7 +579,7 @@ def explain(payload: Req):
 def build_report(payload: ReportReq):
     metric = payload.parsed_intent.get("metric_code", "指标")
     intent = payload.parsed_intent.get("intent", "query")
-    result = _build_explain_response(metric, payload.rows) if intent == "explain" else _build_metric_response(metric, payload.rows, payload.parsed_intent, payload.peer_benchmark, payload.external_benchmark_requested)
+    result = _build_explain_response(metric, payload.rows) if intent == "explain" else _build_metric_response(metric, payload.rows, payload.parsed_intent, payload.portfolio_breakdown, payload.portfolio_outliers, payload.peer_benchmark, payload.external_benchmark_requested)
     result = _apply_llm_enhancement(payload.question, payload.parsed_intent, payload.rows, result)
     sections = result.get("report_sections", [])
     markdown = "\n\n".join(f"## {item['title']}\n{item['content']}" for item in sections)

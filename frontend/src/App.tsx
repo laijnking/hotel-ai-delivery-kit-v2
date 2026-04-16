@@ -153,6 +153,10 @@ function getPrimarySections(result: any) {
   return [];
 }
 
+function hasDetailedSections(result: any) {
+  return getPrimarySections(result).length > 0;
+}
+
 function getExecutiveSummaryLine(result: any) {
   const sections = getPrimarySections(result);
   const conclusion = sections.find((item: any) => item.title === "结论");
@@ -247,8 +251,157 @@ function getRecognizedScopeItems(result: any) {
     { label: "范围", value: queryPlan.query_object_label || hotels[0] || areas[0] || "当前管理范围" },
     { label: "时间", value: formatTimeScopeLabel(parsed.time_scope) },
     { label: "指标", value: getMetricLabel(result) },
-    { label: "模式", value: queryPlan.analysis_mode || parsed.compare_mode || "系统默认" },
+    { label: "模式", value: getAnalysisModeLabel(queryPlan.analysis_mode || parsed.compare_mode || "系统默认") },
   ];
+}
+
+function getAnalysisModeLabel(value: unknown) {
+  const text = String(value || "");
+  if (text === "portfolio_overview") return "组合总览";
+  if (text === "hotel_metric_snapshot") return "单点快照";
+  if (text === "management_report") return "管理摘要";
+  if (text === "driver_analysis") return "归因分析";
+  if (text === "ranking_overview") return "排名概览";
+  return text || "系统默认";
+}
+
+function getDisplayRows(result: any) {
+  if (Array.isArray(result?.portfolio_breakdown) && result.portfolio_breakdown.length) {
+    return result.portfolio_breakdown;
+  }
+  return Array.isArray(result?.data_points) ? result.data_points : [];
+}
+
+function getPortfolioMemberCount(result: any) {
+  const directCount = result?.portfolio_member_count;
+  if (typeof directCount === "number" && !Number.isNaN(directCount)) return directCount;
+  const firstPoint = Array.isArray(result?.data_points) && result.data_points.length ? result.data_points[0] : null;
+  if (typeof firstPoint?.portfolio_member_count === "number" && !Number.isNaN(firstPoint.portfolio_member_count)) {
+    return firstPoint.portfolio_member_count;
+  }
+  const plannedCount = result?.parsed_intent?.query_plan?.resolved_hotel_count;
+  if (typeof plannedCount === "number" && !Number.isNaN(plannedCount)) return plannedCount;
+  return null;
+}
+
+function getPortfolioOutlierItems(result: any) {
+  const outliers = result?.portfolio_outliers;
+  if (!outliers || typeof outliers !== "object") return [];
+  const buckets = [
+    {
+      key: "income",
+      title: "收入拉动",
+      leadLabel: "拉动较强",
+      lagLabel: "拖累较明显",
+      format: (item: any) => `差额 ${formatNumber(item?.diff_value)}`
+    },
+    {
+      key: "profit",
+      title: "利润表现",
+      leadLabel: "表现较强",
+      lagLabel: "承压较明显",
+      format: (item: any) => `经营利润 ${formatNumber(item?.operating_profit_actual)}`
+    },
+    {
+      key: "cost",
+      title: "成本效率",
+      leadLabel: "成本较低",
+      lagLabel: "人工成本偏高",
+      format: (item: any) => `人工成本 ${formatNumber(item?.people_cost_actual)}`
+    }
+  ];
+  return buckets
+    .map((bucket) => {
+      const source = outliers?.[bucket.key];
+      if (!source || typeof source !== "object") return null;
+      const best = source.best && typeof source.best === "object" ? source.best : null;
+      const worst = source.worst && typeof source.worst === "object" ? source.worst : null;
+      if (!best && !worst) return null;
+      return {
+        title: bucket.title,
+        best: best?.hotel_name ? `${bucket.leadLabel}：${best.hotel_name}，${bucket.format(best)}` : null,
+        worst: worst?.hotel_name ? `${bucket.lagLabel}：${worst.hotel_name}，${bucket.format(worst)}` : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function shiftMonth(timeScope: string, offset: number) {
+  if (!/^\d{6}$/.test(timeScope)) return null;
+  const year = Number(timeScope.slice(0, 4));
+  const month = Number(timeScope.slice(4, 6));
+  const date = new Date(year, month - 1 + offset, 1);
+  return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+}
+
+function getQuickFilters(result: any) {
+  if (Array.isArray(result?.quick_filters) && result.quick_filters.length) {
+    return result.quick_filters;
+  }
+  const parsed = result?.parsed_intent || {};
+  const rows = getDisplayRows(result);
+  const currentTimeScope = String(parsed?.time_scope || "");
+  const queryPlan = parsed?.query_plan || {};
+  const areas = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(parsed?.requested_areas) ? parsed.requested_areas : []),
+        ...rows.map((item: any) => String(item?.area || "").trim()).filter(Boolean),
+      ],
+    ),
+  ).slice(0, 3);
+  const hotels = Array.from(
+    new Set(
+      rows
+        .map((item: any) => String(item?.hotel_name || "").trim())
+        .filter((item: string) => item && item !== String(result?.parsed_intent?.query_plan?.query_object_label || "").trim()),
+    ),
+  ).slice(0, 3);
+  const brands = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(parsed?.requested_brand_children) ? parsed.requested_brand_children : []),
+        ...rows.map((item: any) => String(item?.brand_child || "").trim()).filter(Boolean),
+      ],
+    ),
+  ).slice(0, 3);
+  const months = [shiftMonth(currentTimeScope, -1), formatTimeScopeLabel(currentTimeScope), shiftMonth(currentTimeScope, 1)].filter(Boolean) as string[];
+  const compareOptions = [
+    { label: "预算对比", prompt: "切换成预算对比", active: parsed?.compare_mode === "budget" },
+    { label: "同比变化", prompt: "切换成同比变化", active: parsed?.compare_mode === "yoy" },
+    { label: "实际表现", prompt: "切换成实际表现", active: parsed?.compare_mode === "actual" },
+  ].filter((item) => !item.active).slice(0, 2);
+  const modeOptions = [
+    { label: "组合总览", prompt: "改看组合总览", active: queryPlan?.analysis_mode === "portfolio_overview" },
+    { label: "归因分析", prompt: "继续展开原因", active: queryPlan?.analysis_mode === "driver_analysis" },
+    { label: "经营摘要", prompt: "换成经营摘要", active: queryPlan?.analysis_mode === "management_report" },
+  ].filter((item) => !item.active).slice(0, 2);
+  return [
+    {
+      label: "区域",
+      items: areas.map((item) => ({ label: item, prompt: `只看${item}` })),
+    },
+    {
+      label: "酒店",
+      items: hotels.map((item) => ({ label: item, prompt: `只看${item}` })),
+    },
+    {
+      label: "月份",
+      items: months.map((item) => ({ label: item, prompt: `切到${item}` })),
+    },
+    {
+      label: "品牌",
+      items: brands.map((item) => ({ label: item, prompt: `只看${item}品牌` })),
+    },
+    {
+      label: "口径",
+      items: compareOptions.map(({ label, prompt }) => ({ label, prompt })),
+    },
+    {
+      label: "分析方式",
+      items: modeOptions.map(({ label, prompt }) => ({ label, prompt })),
+    },
+  ].filter((group) => group.items.length);
 }
 
 function formatBenchmarkScope(scope: any) {
@@ -407,9 +560,63 @@ function rewriteFollowUpQuestion(input: string, context: ConversationContext) {
   }
 
   const regionMatch = trimmed.match(/华南区|华东区|华北区|西南区|华中区|东北区|西北区/);
+  const monthMatch = trimmed.match(/(20\d{2})年\s*(1[0-2]|0?[1-9])月/);
+  const scopedTarget = trimmed.startsWith("只看") ? trimmed.replace(/^只看/, "").trim() : "";
   if (trimmed.includes("只看") && regionMatch) {
     return {
       rewritten: `基于“${lastQuestion}”，范围只看${regionMatch[0]}。`,
+      usedContext: true
+    };
+  }
+
+  if (trimmed.includes("只看") && scopedTarget) {
+    return {
+      rewritten: `基于“${lastQuestion}”，范围只看${scopedTarget}。`,
+      usedContext: true
+    };
+  }
+
+  if ((trimmed.includes("切到") || trimmed.includes("改看") || trimmed.includes("看")) && monthMatch) {
+    return {
+      rewritten: `基于“${lastQuestion}”，时间切到${monthMatch[1]}年${Number(monthMatch[2])}月。`,
+      usedContext: true
+    };
+  }
+
+  if (trimmed.includes("品牌")) {
+    const brandTarget = trimmed.replace(/^只看/, "").replace(/品牌/g, "").trim();
+    if (brandTarget) {
+      return {
+        rewritten: `基于“${lastQuestion}”，范围只看${brandTarget}品牌。`,
+        usedContext: true
+      };
+    }
+  }
+
+  if (trimmed.includes("预算对比")) {
+    return {
+      rewritten: `基于“${lastQuestion}”，切换成预算对比口径。`,
+      usedContext: true
+    };
+  }
+
+  if (trimmed.includes("同比变化")) {
+    return {
+      rewritten: `基于“${lastQuestion}”，切换成同比变化口径。`,
+      usedContext: true
+    };
+  }
+
+  if (trimmed.includes("实际表现")) {
+    return {
+      rewritten: `基于“${lastQuestion}”，切换成实际表现口径。`,
+      usedContext: true
+    };
+  }
+
+  if (trimmed.includes("组合总览")) {
+    return {
+      rewritten: `基于“${lastQuestion}”，改看组合总览。`,
       usedContext: true
     };
   }
@@ -481,9 +688,15 @@ function ResultCard({
   const sections = getPrimarySections(result);
   const executiveLine = getExecutiveSummaryLine(result);
   const finalSuggestions = result?.interaction_mode === "clarification" ? getClarificationSuggestions(result) : suggestions;
-  const firstPoint = Array.isArray(result?.data_points) && result.data_points.length ? result.data_points[0] : null;
+  const displayRows = getDisplayRows(result);
+  const firstPoint = displayRows.length ? displayRows[0] : null;
   const performanceLabel = getPerformanceLabel(result);
   const recognizedScopeItems = getRecognizedScopeItems(result);
+  const portfolioSummaryPoint = Array.isArray(result?.data_points) && result.data_points.length ? result.data_points[0] : null;
+  const isPortfolio = String(result?.parsed_intent?.query_plan?.query_grain || "") === "portfolio";
+  const portfolioMemberCount = getPortfolioMemberCount(result);
+  const portfolioOutlierItems = getPortfolioOutlierItems(result);
+  const quickFilters = getQuickFilters(result);
   return (
     <div className="result-card" data-testid="result-card">
       <div className="assistant-card-head">
@@ -497,20 +710,20 @@ function ResultCard({
       {firstPoint ? (
         <div className="metric-strip" data-testid="primary-metric-strip">
           <div className="metric-tile">
-            <span>酒店</span>
-            <strong>{firstPoint.hotel_name || "当前范围"}</strong>
+            <span>{isPortfolio ? "组合" : "酒店"}</span>
+            <strong>{(isPortfolio ? portfolioSummaryPoint?.hotel_name : firstPoint.hotel_name) || "当前范围"}</strong>
           </div>
           <div className="metric-tile">
             <span>实际</span>
-            <strong>{formatNumber(firstPoint.actual_value)}</strong>
+            <strong>{formatNumber((isPortfolio ? portfolioSummaryPoint?.actual_value : firstPoint.actual_value))}</strong>
           </div>
           <div className="metric-tile">
             <span>差额</span>
-            <strong>{formatNumber(firstPoint.diff_value)}</strong>
+            <strong>{formatNumber((isPortfolio ? portfolioSummaryPoint?.diff_value : firstPoint.diff_value))}</strong>
           </div>
           <div className="metric-tile">
-            <span>差异率</span>
-            <strong>{formatPercent(firstPoint.diff_rate)}</strong>
+            <span>{isPortfolio ? "样本数" : "差异率"}</span>
+            <strong>{isPortfolio ? formatNumber(portfolioMemberCount) : formatPercent(firstPoint.diff_rate)}</strong>
           </div>
         </div>
       ) : null}
@@ -541,16 +754,31 @@ function ResultCard({
       <InternalBenchmarkCard benchmark={result?.internal_benchmark} />
       <ExternalBenchmarkCard benchmark={result?.external_benchmark} />
 
-      {Array.isArray(result?.data_points) && result.data_points.length ? (
+      {displayRows.length ? (
         <div className="result-block" data-testid="top-data-points">
-          <div className="result-block-title">关键数据</div>
+          <div className="result-block-title">{isPortfolio ? "组合内重点酒店" : "关键数据"}</div>
           <div className="mobile-section-list">
-            {result.data_points.slice(0, 5).map((item: any, index: number) => (
+            {displayRows.slice(0, 5).map((item: any, index: number) => (
               <div className="mobile-section-card" key={`${item.hotel_name}-${index}`}>
                 <div className="mobile-section-title">{index + 1}. {item.hotel_name || "未知酒店"}</div>
                 <div className="mobile-section-content">
                   实际 {formatNumber(item.actual_value)}，对比 {formatNumber(item.compare_value)}，差额 {formatNumber(item.diff_value)}，差异率 {formatPercent(item.diff_rate)}
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {portfolioOutlierItems.length ? (
+        <div className="result-block" data-testid="portfolio-outliers">
+          <div className="result-block-title">组合异常拆解</div>
+          <div className="outlier-grid">
+            {portfolioOutlierItems.map((item: any) => (
+              <div className="outlier-card" key={item.title}>
+                <div className="outlier-title">{item.title}</div>
+                {item.best ? <div className="outlier-line positive">{item.best}</div> : null}
+                {item.worst ? <div className="outlier-line negative">{item.worst}</div> : null}
               </div>
             ))}
           </div>
@@ -570,15 +798,18 @@ function ResultCard({
         </div>
       ) : null}
 
-      {sections.length ? (
-        <div className="mobile-section-list" data-testid="executive-sections">
-          {sections.map((section: any, index: number) => (
-            <div className="mobile-section-card" key={`${section.title}-${index}`} data-testid={`section-${section.title}`}>
-              <div className="mobile-section-title">{section.title}</div>
-              <div className="mobile-section-content">{section.content}</div>
-            </div>
-          ))}
-        </div>
+      {hasDetailedSections(result) ? (
+        <details className="details-card analysis-details-card" data-testid="details-analysis-sections">
+          <summary>查看分析明细</summary>
+          <div className="mobile-section-list">
+            {sections.map((section: any, index: number) => (
+              <div className="mobile-section-card" key={`${section.title}-${index}`} data-testid={`section-${section.title}`}>
+                <div className="mobile-section-title">{section.title}</div>
+                <div className="mobile-section-content">{section.content}</div>
+              </div>
+            ))}
+          </div>
+        </details>
       ) : null}
 
       {result?.trace_id || result?.parsed_intent ? (
@@ -629,23 +860,47 @@ function ResultCard({
         </details>
       ) : null}
 
-      <div className="result-block" data-testid="follow-up-actions">
-        <div className="result-block-title">你可以继续问</div>
-        <div className="chip-list">
-          {finalSuggestions.map((item, index) => (
-            <button
-              type="button"
-              className="chip"
-              key={item}
-              disabled={disabled}
-              onClick={() => onFollowUp(item)}
-              data-testid={`follow-up-${index}`}
-            >
-              {item}
-            </button>
-          ))}
+      <details className="details-card follow-up-details-card" data-testid="follow-up-actions">
+        <summary>你可以继续问</summary>
+        <div className="result-block">
+          {quickFilters.length ? (
+            <div className="quick-filter-groups inline-followup-filters" data-testid="quick-filters">
+              {quickFilters.map((group) => (
+                <div className="quick-filter-group" key={group.label}>
+                  <div className="quick-filter-label">{group.label}</div>
+                  <div className="chip-list">
+                    {group.items.map((item) => (
+                      <button
+                        type="button"
+                        className="chip chip-secondary"
+                        key={`${group.label}-${item.label}`}
+                        disabled={disabled}
+                        onClick={() => onFollowUp(item.prompt)}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="chip-list">
+            {finalSuggestions.map((item, index) => (
+              <button
+                type="button"
+                className="chip"
+                key={item}
+                disabled={disabled}
+                onClick={() => onFollowUp(item)}
+                data-testid={`follow-up-${index}`}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      </details>
     </div>
   );
 }

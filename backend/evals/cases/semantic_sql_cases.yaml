@@ -1,0 +1,209 @@
+cases:
+  - id: income_guangzhou_ritz_hotel_mar_2026
+    question: 广州丽思卡尔顿酒店3月的收入情况怎么样？
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_income_overview
+      metric_code: TOTAL_INCOME
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 广州丽思卡尔顿酒店
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - wddm_dim_overview_cockpit_f
+        - TOTAL_INCOME_MTD_A
+        - TOTAL_INCOME_MTD_B
+        - "202603"
+        - 广州丽思卡尔顿酒店
+
+  - id: income_guangzhou_ritz_apartment_mar_2026
+    question: 广州丽思卡尔顿公寓3月收入情况
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_income_overview
+      metric_code: TOTAL_INCOME
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 广州丽思卡尔顿公寓
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - wddm_dim_overview_cockpit_f
+        - TOTAL_INCOME_MTD_A
+        - TOTAL_INCOME_MTD_B
+        - 广州丽思卡尔顿公寓
+      not_contains:
+        - "LIKE '%广州丽思卡尔顿酒店%'"
+
+  - id: profit_jiangmen_jiahua_mar_2026
+    question: 看一下江门嘉华酒店3月的经营情况
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_operation_overview
+      metric_code: OPERATING_PROFIT
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 江门嘉华
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - wddm_dim_overview_cockpit_f
+        - OPERATING_PROFIT_MTD_A
+        - OPERATING_PROFIT_MTD_B
+        - TOTAL_INCOME_MTD_A
+        - OCCUPANCY_RATE_MTD_A
+        - PEOPLE_COST_MTD_A
+        - 江门嘉华
+
+  - id: operation_beijing_renaissance_full_name_jan_2026
+    question: 北京富力万丽酒店1月的经营情况怎么样？
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_operation_overview
+      metric_code: OPERATING_PROFIT
+      compare_mode: budget
+      time_scope: "202601"
+      requested_hotels:
+        - 北京富力万丽酒店
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - wddm_dim_overview_cockpit_f
+        - CONCAT_WS
+        - OPERATING_PROFIT_MTD_A
+        - TOTAL_INCOME_MTD_A
+        - ROOM_INCOME_MTD_A
+        - OCCUPANCY_RATE_MTD_A
+        - INCOME_PER_ROOM_MTD_A
+        - PEOPLE_COST_MTD_A
+        - 北京富力万丽酒店
+    answer_sample_rows:
+      - hotel_name: 北京万丽
+        area: 华北区
+        brand: 国际品牌
+        brand_child: 万豪
+        brand_level: 标准五星级
+        city_level: 一线城市
+        actual_value: 4204313.0
+        compare_value: 2861988.0
+        diff_value: 1342325.0
+        diff_rate: 0.469
+        total_income_actual: 12642100.0
+        total_income_budget: 11462572.0
+        total_income_last_year: 12856260.0
+        room_income_actual: 9225748.0
+        restaurant_income_actual: 1534594.125
+        banquet_income_actual: 1543950.0
+        other_dept_income_actual: 64288.0117
+        other_rate_income_actual: 273519.3438
+        occupancy_rate_actual: 0.636
+        occupancy_rate_budget: 0.5593
+        occupancy_rate_last_year: 0.6282
+        adr_actual: 896.4
+        adr_budget: 892.2
+        adr_last_year: 888.72
+        revpar_actual: 570.12
+        revpar_budget: 498.97
+        revpar_last_year: 558.32
+        operating_profit_actual: 4204313.0
+        operating_profit_budget: 2861988.0
+        operating_profit_last_year: 3241997.5
+        owner_profit_actual: 3095227.5
+        room_profit_actual: 6930938.47
+        restaurant_profit_actual: 55023.3
+        people_cost_actual: 3948258.66
+        energy_expenses_actual: 931929.75
+        restaurant_cost_actual: 3023520.75
+        room_cost_actual: 2294809.75
+        admin_expenses_actual: 2151581.25
+    answer_assertions:
+      sections:
+        - 分析范围
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标
+      must_mention:
+        - 总收入
+        - 客房收入
+        - ADR
+        - RevPAR
+        - 经营利润率
+        - 人工成本
+        - 华北区
+      not_mention:
+        - 经营状态偏健康
+        - 建议立即
+        - 好坏结论
+
+  - id: income_hainan_area_current_month
+    question: 只看海南区本月收入情况
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_income_overview
+      metric_code: TOTAL_INCOME
+      compare_mode: budget
+      time_scope: "202601"
+      requested_hotels: []
+      requested_areas:
+        - 海南区
+    sql_assertions:
+      contains:
+        - s.area IN ('海南区')
+        - TOTAL_INCOME_MTD_A
+        - TOTAL_INCOME_MTD_B
+
+  - id: income_guangzhou_park_hyatt_revenue_phrase
+    question: 广州柏悦3月营收表现
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_income_overview
+      metric_code: TOTAL_INCOME
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 广州柏悦
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - TOTAL_INCOME_MTD_A
+        - TOTAL_INCOME_MTD_B
+        - 广州柏悦
+
+  - id: profit_jiangmen_jiahua_profit_phrase
+    question: 江门嘉华3月利润情况
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_profit_overview
+      metric_code: OPERATING_PROFIT
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 江门嘉华
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - OPERATING_PROFIT_MTD_A
+        - OPERATING_PROFIT_MTD_B
+        - 江门嘉华
+
+  - id: profit_under_budget_direction
+    question: 本月哪些酒店经营利润未达预算？
+    time_scope: "202601"
+    expected:
+      skill_id:
+      metric_code: OPERATING_PROFIT
+      compare_mode: budget
+      variance_direction: below
+      time_scope: "202601"
+      requested_hotels: []
+      requested_areas: []
+    sql_assertions:
+      contains:
+        - OPERATING_PROFIT_MTD_A < o.OPERATING_PROFIT_MTD_B
+        - ORDER BY (o.OPERATING_PROFIT_MTD_A - o.OPERATING_PROFIT_MTD_B) ASC

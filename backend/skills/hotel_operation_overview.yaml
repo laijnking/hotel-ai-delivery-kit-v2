@@ -1,0 +1,57 @@
+id: hotel_operation_overview
+name: 酒店经营总览
+version: 1
+enabled: true
+description: 回答单店、多店或区域某月份经营整体情况，默认以经营利润为锚点，同时带出收入结构、客房效率、利润质量、成本效率和横向对标。
+
+triggers:
+  - 经营情况怎么样
+  - 经营情况如何
+  - 经营状况怎么样
+  - 经营表现怎么样
+  - 经营情况
+  - 经营状况
+  - 经营表现
+  - 整体经营情况
+  - 整体情况
+  - 总体情况
+
+defaults:
+  intent: query
+  metric_code: OPERATING_PROFIT
+  compare_mode: budget
+  variance_direction: all
+  period_type: MTD
+
+slots:
+  hotel:
+    entity: hotel
+    required: false
+  area:
+    entity: area
+    required: false
+  brand:
+    entity: brand
+    required: false
+  month:
+    type: period
+    required: false
+
+sql_strategy: overview_operation_package
+answer_template: operation_overview_mobile
+
+analysis_dimensions:
+  - 收入质量
+  - 客房效率
+  - 利润质量
+  - 成本效率
+  - 横向对标
+
+examples:
+  - question: 北京富力万丽酒店1月的经营情况怎么样？
+    expected:
+      metric_code: OPERATING_PROFIT
+      compare_mode: budget
+      time_scope: "202601"
+      requested_hotels:
+        - 北京富力万丽酒店

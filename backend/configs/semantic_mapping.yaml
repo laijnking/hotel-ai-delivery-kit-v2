@@ -1,0 +1,52 @@
+synonyms:
+  经营利润: OPERATING_PROFIT
+  经营情况: OPERATING_PROFIT
+  经营状况: OPERATING_PROFIT
+  经营表现: OPERATING_PROFIT
+  GOP: OPERATING_PROFIT
+  利润: OPERATING_PROFIT
+  operating profit: OPERATING_PROFIT
+  总收入: TOTAL_INCOME
+  收入: TOTAL_INCOME
+  total income: TOTAL_INCOME
+  revenue: TOTAL_INCOME
+  每房收益: REVPAR
+  RevPAR: REVPAR
+  revpar: REVPAR
+
+intents:
+  排名: rank
+  前十: rank
+  最高: rank
+  最低: rank
+  原因: explain
+  为什么: explain
+  解释: explain
+  归因: explain
+  摘要: report
+  报告: report
+  晨报: report
+
+compare_keywords:
+  budget:
+    - 预算
+    - 未达预算
+    - 低于预算
+    - 预算差异
+    - 达成率
+    - 目标
+  yoy:
+    - 同比
+    - 去年同期
+    - 去年
+  actual:
+    - 实际
+    - 当前
+    - 本月
+
+defaults:
+  time_scope: "202601"
+  period_type: MTD
+  intent: query
+  compare_mode: actual
+  default_metric_code: TOTAL_INCOME

@@ -1,0 +1,11 @@
+forbidden_patterns:
+  - "SELECT *"
+  - "DELETE "
+  - "UPDATE "
+  - "INSERT "
+  - "DROP "
+  - "TRUNCATE "
+non_additive_metrics:
+  - OCC
+  - ADR
+  - REVPAR

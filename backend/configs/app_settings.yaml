@@ -1,0 +1,74 @@
+quick_questions:
+  - 本月哪些酒店经营利润未达预算？
+  - 广州丽思卡尔顿酒店3月的收入情况怎么样？
+  - 看一下江门嘉华酒店3月的经营情况
+  - 本月总收入同比如何？
+  - 生成华南区本月经营摘要
+
+model_config:
+  fast_model:
+    role: 快速语义解析与交互确认
+    env: QWEN_FAST_MODEL
+    default: qwen3.5-flash
+  deep_model:
+    role: 深度经营分析与管理层表达
+    env: QWEN_DEEP_MODEL
+    default: qwen3.6-plus
+  parse_contract:
+    required_fields:
+      - intent
+      - metric_code
+      - compare_mode
+      - variance_direction
+      - time_scope
+      - requested_areas
+      - requested_hotels
+    metric_codes:
+      OPERATING_PROFIT: 经营利润
+      TOTAL_INCOME: 总收入
+      REVPAR: 每房收益
+    compare_modes:
+      actual: 实际/预算或默认对比
+      budget: 预算对比
+      yoy: 同比
+
+answer_templates:
+  metric_query:
+    title: 酒店运营拆解
+    structure:
+      - 不直接下经营好坏结论，先说明当前数据只支持哪些观察
+      - 收入质量：总收入、客房收入、餐饮/宴会收入结构
+      - 客房效率：入住率、ADR、RevPAR
+      - 利润质量：经营利润是否跟随收入改善
+      - 成本效率：人工、能耗、餐饮成本、费用率
+      - 横向对标：同区域、同品牌、同档次
+      - 对缺失数据明确标注“当前未取数”，不要编造
+  clarification:
+    title: 澄清追问
+    structure:
+      - 只问一个关键缺口
+      - 提供 2-4 个可点击选项
+      - 尽量保留用户原始上下文
+  follow_up:
+    title: 连续追问
+    structure:
+      - 继承上一次酒店、区域、指标、月份
+      - 将“继续展开原因”“只看华南区”等短句改写成完整问题
+
+tuning_stages:
+  - name: 语义解析
+    owner: fast_model
+    observable: 查看结构化数据里的 parsed_intent
+    success_criteria: 酒店、月份、指标、对比口径、意图全部正确
+  - name: SQL生成
+    owner: rule_engine
+    observable: 查看 SQL 计划
+    success_criteria: 表、字段、WHERE、排序和权限范围正确
+  - name: 数据执行
+    owner: db_executor
+    observable: 核心数据 Top 5 和 data_points
+    success_criteria: 返回真实酒店数据，不出现示例酒店
+  - name: 经营解释
+    owner: deep_model
+    observable: 管理层速览、风险、建议
+    success_criteria: 结论清楚、数字完整、建议可执行

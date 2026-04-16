@@ -1,0 +1,26 @@
+entities:
+  hotel:
+    source: C:/Project/HotelAgent/basedata/酒店数据.txt
+    header_prefix: hotelNames酒店名称包括：
+    alias_rules:
+      allow_hotel_suffix_for_short_names: true
+
+  area:
+    source: C:/Project/HotelAgent/basedata/区域数据.txt
+    header_prefix: areas区域名称包括：
+
+  brand:
+    source: C:/Project/HotelAgent/basedata/品牌数据.txt
+    header_prefix: hotelBrands品牌名称包括：
+
+  brand_child:
+    source: C:/Project/HotelAgent/basedata/品牌数据.txt
+    header_prefix: hotelBrands品牌名称包括：
+
+  manage_corp:
+    source: C:/Project/HotelAgent/basedata/管理方数据.txt
+    header_prefix: manageCorps管理方名称包括：
+
+  city:
+    source: C:/Project/HotelAgent/basedata/城市数据.txt
+    header_prefix: cities城市名称包括：

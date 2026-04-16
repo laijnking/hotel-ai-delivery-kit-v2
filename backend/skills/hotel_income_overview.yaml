@@ -1,0 +1,44 @@
+id: hotel_income_overview
+name: 单店收入情况
+version: 1
+enabled: true
+description: 回答单个酒店或区域某月份收入表现，默认与预算对比。
+
+triggers:
+  - 收入情况
+  - 收入怎么样
+  - 收入如何
+  - 营收情况
+  - 营收表现
+  - 总收入情况
+  - 总收入怎么样
+
+defaults:
+  intent: query
+  metric_code: TOTAL_INCOME
+  compare_mode: budget
+  variance_direction: all
+  period_type: MTD
+
+slots:
+  hotel:
+    entity: hotel
+    required: false
+  area:
+    entity: area
+    required: false
+  month:
+    type: period
+    required: false
+
+sql_strategy: overview_metric_compare
+answer_template: metric_query_mobile
+
+examples:
+  - question: 广州丽思卡尔顿酒店3月的收入情况怎么样？
+    expected:
+      metric_code: TOTAL_INCOME
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 广州丽思卡尔顿酒店

@@ -1,0 +1,56 @@
+metrics:
+  - metric_code: OPERATING_PROFIT
+    name_cn: 经营利润
+    aliases:
+      - 经营利润
+      - 经营情况
+      - 经营状况
+      - 经营表现
+      - 利润
+      - operating profit
+    source_table: wddm_dim_overview_cockpit_f
+    compare_modes:
+      - actual
+      - budget
+      - yoy
+    period_fields:
+      MTD:
+        actual: OPERATING_PROFIT_MTD_A
+        budget: OPERATING_PROFIT_MTD_B
+        last_year: OPERATING_PROFIT_MTD_L
+
+  - metric_code: TOTAL_INCOME
+    name_cn: 总收入
+    aliases:
+      - 总收入
+      - 收入
+      - total income
+      - revenue
+    source_table: wddm_dim_overview_cockpit_f
+    compare_modes:
+      - actual
+      - budget
+      - yoy
+    period_fields:
+      MTD:
+        actual: TOTAL_INCOME_MTD_A
+        budget: TOTAL_INCOME_MTD_B
+        last_year: TOTAL_INCOME_MTD_L
+
+  - metric_code: REVPAR
+    name_cn: 每房收益
+    aliases:
+      - 每房收益
+      - revpar
+      - room revenue per available room
+    source_table: wddm_dim_overview_cockpit_f
+    compare_modes:
+      - actual
+      - budget
+      - yoy
+    non_additive: true
+    period_fields:
+      MTD:
+        actual: INCOME_PER_ROOM_MTD_A
+        budget: INCOME_PER_ROOM_MTD_B
+        last_year: INCOME_PER_ROOM_MTD_L

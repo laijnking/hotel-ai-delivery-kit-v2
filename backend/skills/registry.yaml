@@ -1,0 +1,15 @@
+skills:
+  - id: hotel_operation_overview
+    file: hotel_operation_overview.yaml
+    enabled: true
+    version: 1
+
+  - id: hotel_income_overview
+    file: hotel_income_overview.yaml
+    enabled: true
+    version: 1
+
+  - id: hotel_profit_overview
+    file: hotel_profit_overview.yaml
+    enabled: true
+    version: 1

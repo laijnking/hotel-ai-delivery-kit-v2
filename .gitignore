@@ -1,0 +1,7 @@
+backend/runtime/
+frontend/dist/
+frontend/node_modules/
+*.pyc
+__pycache__/
+backend/evals/reports/
+runtime/logs/

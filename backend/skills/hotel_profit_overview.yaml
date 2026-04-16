@@ -1,0 +1,44 @@
+id: hotel_profit_overview
+name: 单店经营利润情况
+version: 1
+enabled: true
+description: 回答单个酒店或区域某月份经营利润表现，默认与预算对比。
+
+triggers:
+  - 经营利润情况
+  - 经营利润表现
+  - 利润情况
+  - 利润表现
+  - 经营情况
+  - 经营状况
+  - 经营表现
+
+defaults:
+  intent: query
+  metric_code: OPERATING_PROFIT
+  compare_mode: budget
+  variance_direction: all
+  period_type: MTD
+
+slots:
+  hotel:
+    entity: hotel
+    required: false
+  area:
+    entity: area
+    required: false
+  month:
+    type: period
+    required: false
+
+sql_strategy: overview_metric_compare
+answer_template: metric_query_mobile
+
+examples:
+  - question: 看一下江门嘉华酒店3月的经营情况
+    expected:
+      metric_code: OPERATING_PROFIT
+      compare_mode: budget
+      time_scope: "202603"
+      requested_hotels:
+        - 江门嘉华

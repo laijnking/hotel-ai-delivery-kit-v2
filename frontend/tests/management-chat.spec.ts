@@ -45,7 +45,16 @@ test.beforeEach(async ({ page }) => {
       body: JSON.stringify({
         trace_id: "trace_frontend_mock",
         summary: isReport ? "已生成 mock酒店 经营摘要。" : "已完成 mock酒店 的经营对比分析，返回 1 家酒店。",
-        parsed_intent: { intent: isReport ? "report" : "query", metric_code: "TOTAL_INCOME", compare_mode: "budget", question: payload.question, requested_hotels: ["mock酒店"], requested_areas: [], time_scope: "202603" },
+        parsed_intent: {
+          intent: isReport ? "report" : "query",
+          metric_code: "TOTAL_INCOME",
+          compare_mode: "budget",
+          question: payload.question,
+          requested_hotels: ["mock酒店"],
+          requested_areas: [],
+          time_scope: "202603",
+          query_plan: { query_object_label: "mock酒店", analysis_mode: "hotel_metric_snapshot" }
+        },
         metric_definition: { name_cn: "总收入" },
         data_points: [{ hotel_name: "mock酒店", area: "华南区", actual_value: 1200000, compare_value: 1000000, diff_value: 200000, diff_rate: 0.2 }],
         internal_benchmark: {
@@ -99,6 +108,7 @@ test("发送按钮会返回三段式经营结果", async ({ page }) => {
   await expect(page.getByTestId("result-summary").last()).toContainText(/返回|完成|酒店/);
   await expect(page.getByTestId("recognized-scope").last()).toContainText("mock酒店");
   await expect(page.getByTestId("recognized-scope").last()).toContainText("2026年3月");
+  await expect(page.getByTestId("recognized-scope").last()).toContainText("hotel_metric_snapshot");
   await expect(page.getByTestId("executive-overview").last()).toContainText("管理层速览");
   await expect(page.getByTestId("internal-benchmark-card").last()).toContainText("同区域同品牌");
   await expect(page.getByTestId("section-结论").last()).toContainText("已完成");

@@ -242,11 +242,12 @@ function getRecognizedScopeItems(result: any) {
   const parsed = result?.parsed_intent || result?.source_query?.parsed_intent || {};
   const hotels = Array.isArray(parsed.requested_hotels) ? parsed.requested_hotels.filter(Boolean) : [];
   const areas = Array.isArray(parsed.requested_areas) ? parsed.requested_areas.filter(Boolean) : [];
+  const queryPlan = parsed?.query_plan || result?.query_plan || {};
   return [
-    { label: "范围", value: hotels[0] || areas[0] || "当前管理范围" },
+    { label: "范围", value: queryPlan.query_object_label || hotels[0] || areas[0] || "当前管理范围" },
     { label: "时间", value: formatTimeScopeLabel(parsed.time_scope) },
     { label: "指标", value: getMetricLabel(result) },
-    { label: "口径", value: parsed.compare_mode || "系统默认" },
+    { label: "模式", value: queryPlan.analysis_mode || parsed.compare_mode || "系统默认" },
   ];
 }
 

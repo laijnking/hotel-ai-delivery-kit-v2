@@ -59,6 +59,14 @@ _ACCOUNT_TERMS = (
     "食品成本",
     "能源费用",
 )
+_HOTEL_GROUP_PATTERN = re.compile(
+    r"(?:查一下|看一下|看下|分析一下|了解一下|帮我|请|麻烦)?"
+    r"(?:(?:20\d{2}年)?\d{1,2}月(?:份)?)?"
+    r"([\u4e00-\u9fa5A-Za-z0-9（）()]{2,20}?)"
+    r"(?:所有|全部|整个|全部的)(?:酒店|门店|项目)"
+)
+_PORTFOLIO_TERMS = ("总体", "整体", "总体经营", "整体经营", "汇总", "汇总情况")
+_ALL_SCOPE_TERMS = ("所有", "全部", "全部的", "整个", "全量")
 
 LLM_BASE_URL = os.getenv("QWEN_API_BASE_URL", "").strip()
 LLM_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
@@ -442,7 +450,7 @@ def extract_scope(question: str) -> dict[str, list[str]]:
             if suffix in {"酒店", "公寓"} and not raw_hotel.endswith(suffix):
                 raw_hotel = f"{raw_hotel}{suffix}"
             hotel = clean_hotel_name(raw_hotel)
-            if any(token in hotel for token in ("哪些酒店", "哪些", "本月", "预算", "同比", "经营利润", "总收入", "每房收益", "奢华级酒店", "五星级酒店")):
+            if any(token in hotel for token in ("哪些酒店", "哪些", "本月", "预算", "同比", "经营利润", "总收入", "每房收益", "奢华级酒店", "五星级酒店", "所有酒店", "全部酒店", "整个酒店")):
                 continue
             if hotel and hotel not in requested_hotels:
                 requested_hotels.append(hotel)
@@ -465,6 +473,138 @@ def extract_scope(question: str) -> dict[str, list[str]]:
         "requested_city_levels": requested_city_levels,
         "requested_departments": requested_departments,
         "requested_accounts": requested_accounts,
+    }
+
+
+def find_hotel_group_token(question: str, scope: dict[str, list[str]]) -> str | None:
+    if scope.get("requested_hotels"):
+        return None
+    match = _HOTEL_GROUP_PATTERN.search(question)
+    if not match:
+        return None
+    candidate = clean_hotel_name(match.group(1))
+    candidate = re.sub(r"^(?:20\d{2}年)?\d{1,2}月(?:份)?", "", candidate).strip()
+    candidate = re.sub(r"(?:查一下|看一下|看下|分析一下|了解一下|帮我|请|麻烦)$", "", candidate).strip()
+    if not candidate or len(candidate) < 2:
+        return None
+    if candidate in {"哪些", "本月", "这个月", "经营", "总体", "整体"}:
+        return None
+    return candidate
+
+
+def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str, object] | None:
+    token = find_hotel_group_token(question, scope)
+    if not token:
+        return None
+    token_norm = normalize_text(token)
+    if not token_norm:
+        return None
+    hotels = load_entity_catalog().get("hotel", [])
+    members: list[str] = []
+    for hotel in hotels:
+        hotel_norm = normalize_text(hotel)
+        if token_norm and token_norm in hotel_norm and hotel not in members:
+            members.append(hotel)
+    if len(members) < 2:
+        return None
+    return {
+        "label": f"{token}体系酒店集合",
+        "group_token": token,
+        "member_hotels": members,
+        "member_count": len(members),
+        "resolution_basis": "hotel_name_contains_token",
+    }
+
+
+def build_resolved_entities(question: str, result: dict) -> dict[str, object]:
+    hotel_group = resolve_hotel_group(question, result)
+    return {
+        "hotels": list(result.get("requested_hotels", [])),
+        "areas": list(result.get("requested_areas", [])),
+        "manage_corps": list(result.get("requested_manage_corps", [])),
+        "brand_children": list(result.get("requested_brand_children", [])),
+        "builders": list(result.get("requested_builders", [])),
+        "brand_levels": list(result.get("requested_brand_levels", [])),
+        "city_levels": list(result.get("requested_city_levels", [])),
+        "departments": list(result.get("requested_departments", [])),
+        "accounts": list(result.get("requested_accounts", [])),
+        "hotel_group": hotel_group,
+    }
+
+
+def is_portfolio_question(question_norm: str) -> bool:
+    return any(normalize_text(term) in question_norm for term in _PORTFOLIO_TERMS) or any(
+        normalize_text(term) in question_norm for term in _ALL_SCOPE_TERMS
+    )
+
+
+def build_query_plan(question: str, result: dict) -> dict[str, object]:
+    question_norm = normalize_text(question)
+    resolved_entities = build_resolved_entities(question, result)
+    hotel_group = resolved_entities.get("hotel_group") if isinstance(resolved_entities.get("hotel_group"), dict) else None
+    areas = list(result.get("requested_areas", []))
+    hotels = list(result.get("requested_hotels", []))
+    manage_corps = list(result.get("requested_manage_corps", []))
+    brand_children = list(result.get("requested_brand_children", []))
+    intent = str(result.get("intent", "query")).strip() or "query"
+    metric_code = str(result.get("metric_code", "TOTAL_INCOME")).strip() or "TOTAL_INCOME"
+    metric_name = _METRIC_LABELS.get(metric_code, metric_code)
+    portfolio_like = is_portfolio_question(question_norm)
+
+    if hotel_group:
+        object_type = "hotel_group"
+        object_label = str(hotel_group.get("label") or "酒店集合")
+        query_grain = "portfolio"
+    elif len(hotels) == 1 and not portfolio_like:
+        object_type = "single_hotel"
+        object_label = hotels[0]
+        query_grain = "hotel"
+    elif areas:
+        object_type = "area_scope"
+        object_label = " / ".join(areas)
+        query_grain = "portfolio" if portfolio_like else "comparison"
+    elif manage_corps:
+        object_type = "manage_corp_scope"
+        object_label = " / ".join(manage_corps)
+        query_grain = "portfolio" if portfolio_like else "comparison"
+    elif brand_children:
+        object_type = "brand_scope"
+        object_label = " / ".join(brand_children)
+        query_grain = "portfolio" if portfolio_like else "comparison"
+    else:
+        object_type = "current_scope"
+        object_label = "当前管理范围"
+        query_grain = "comparison" if intent in {"query", "rank"} else "portfolio"
+
+    if intent == "explain":
+        analysis_mode = "driver_analysis"
+        themes = ["driver_breakdown", "pnl_drilldown"]
+        execution_order = ["resolve_scope", "query_detail", "identify_drivers", "compose_explanation"]
+    elif intent == "report":
+        analysis_mode = "management_report"
+        themes = ["income_quality", "room_efficiency", "profit_quality", "cost_efficiency", "internal_benchmark"]
+        execution_order = ["resolve_scope", "aggregate_metrics", "peer_benchmark", "compose_report"]
+    elif query_grain == "portfolio":
+        analysis_mode = "portfolio_overview"
+        themes = ["income_quality", "room_efficiency", "profit_quality", "cost_efficiency", "internal_benchmark"]
+        execution_order = ["resolve_scope", "aggregate_metrics", "peer_benchmark", "identify_outliers", "compose_overview"]
+    elif intent == "rank":
+        analysis_mode = "ranking_overview"
+        themes = [metric_name]
+        execution_order = ["resolve_scope", "query_ranked_rows", "compose_ranking"]
+    else:
+        analysis_mode = "hotel_metric_snapshot"
+        themes = [metric_name, "internal_benchmark"]
+        execution_order = ["resolve_scope", "query_metric", "compose_snapshot"]
+
+    return {
+        "query_object_type": object_type,
+        "query_object_label": object_label,
+        "query_grain": query_grain,
+        "analysis_mode": analysis_mode,
+        "themes": themes,
+        "execution_order": execution_order,
+        "resolved_hotel_count": len(hotel_group.get("member_hotels", [])) if hotel_group else len(hotels),
     }
 
 
@@ -810,6 +950,8 @@ def parse(payload: Req):
             "llm_skip_reason": "high_confidence_rule_parse",
             "llm_parse_policy": LLM_PARSE_POLICY,
         }
+    merged["resolved_entities"] = build_resolved_entities(payload.question, merged)
+    merged["query_plan"] = build_query_plan(payload.question, merged)
     if should_clarify(merged, payload.question):
         merged.update(build_clarification_prompt(payload.question, merged))
     else:

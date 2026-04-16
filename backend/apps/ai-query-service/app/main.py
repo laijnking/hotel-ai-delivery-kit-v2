@@ -436,6 +436,135 @@ LIMIT 50
 '''.strip()
 
 
+def effective_requested_hotels(parsed: dict) -> list[str]:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    resolved_entities = parsed.get("resolved_entities") if isinstance(parsed.get("resolved_entities"), dict) else {}
+    hotel_group = resolved_entities.get("hotel_group") if isinstance(resolved_entities.get("hotel_group"), dict) else {}
+    if query_plan.get("query_object_type") == "hotel_group":
+        members = [str(item).strip() for item in hotel_group.get("member_hotels", []) if str(item).strip()]
+        if members:
+            return members
+    return [str(item).strip() for item in parsed.get("requested_hotels", []) if str(item).strip()]
+
+
+def build_portfolio_sql(
+    metric_def: dict,
+    parsed: dict,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> str:
+    source_table = safe_identifier(str(metric_def.get("source_table", "ads_hotel_operation_overview_wide")), "source_table")
+    query_parts = build_overview_query_parts(source_table)
+    period_fields = metric_def.get("period_fields", {})
+    if not isinstance(period_fields, dict) or not period_fields:
+        raise HTTPException(status_code=500, detail={"message": "metric definition is missing period_fields"})
+
+    requested_period = str(parsed.get("period_type", "MTD")).strip() or "MTD"
+    fields = period_fields.get(requested_period)
+    if not isinstance(fields, dict):
+        requested_period, fields = next(iter(period_fields.items()))
+    actual_field_name = safe_identifier(str(fields.get("actual", "")), "actual field")
+    compare_mode = str(parsed.get("compare_mode", "actual")).strip() or "actual"
+    if compare_mode == "budget":
+        compare_field = fields.get("budget") or fields.get("last_year") or fields.get("actual")
+    elif compare_mode == "yoy":
+        compare_field = fields.get("last_year") or fields.get("budget") or fields.get("actual")
+    else:
+        compare_field = fields.get("budget") or fields.get("last_year") or fields.get("actual")
+    compare_field_name = safe_identifier(str(compare_field), "compare field")
+    actual_field = f"{query_parts['metric_prefix']}.{actual_field_name}" if query_parts["metric_prefix"] else actual_field_name
+    compare_field = f"{query_parts['metric_prefix']}.{compare_field_name}" if query_parts["metric_prefix"] else compare_field_name
+
+    time_scope = str(parsed.get("time_scope", "")).strip()
+    if not _TIME_SCOPE_RE.fullmatch(time_scope):
+        raise HTTPException(status_code=400, detail={"message": "invalid time_scope", "time_scope": time_scope})
+
+    where_clauses = [f"{query_parts['time_field']} = {sql_literal(time_scope)}"]
+    area_scope = [str(area).strip() for area in (requested_areas or []) if str(area).strip()]
+    if area_scope:
+        area_clause = ", ".join(sql_literal(area) for area in area_scope)
+        where_clauses.append(f"{query_parts['area_filter']} IN ({area_clause})")
+
+    dimension_filters = [
+        ("requested_manage_corps", "manage_corp_filter"),
+        ("requested_brand_children", "brand_child_filter"),
+        ("requested_builders", "builder_filter"),
+        ("requested_brand_levels", "brand_level_filter"),
+        ("requested_city_levels", "city_level_filter"),
+    ]
+    for parsed_key, query_key in dimension_filters:
+        clause = dimension_scope_clause(query_parts[query_key], [str(item).strip() for item in parsed.get(parsed_key, []) if str(item).strip()])
+        if clause:
+            where_clauses.append(clause)
+
+    explicit_hotel_scope = [str(hotel).strip() for hotel in (requested_hotels or []) if str(hotel).strip()]
+    if explicit_hotel_scope:
+        hotel_clause = hotel_scope_clause(query_parts.get("hotel_search_filter", query_parts["hotel_filter"]), explicit_hotel_scope)
+        if hotel_clause:
+            where_clauses.append(hotel_clause)
+
+    hotel_scope = [str(hotel).strip() for hotel in (allowed_hotels or []) if str(hotel).strip()]
+    if hotel_scope and hotel_scope != ["ALL"]:
+        hotel_clause = ", ".join(sql_literal(hotel) for hotel in hotel_scope)
+        where_clauses.append(f"{query_parts['hotel_filter']} IN ({hotel_clause})")
+
+    object_label = str(
+        (parsed.get("query_plan") or {}).get("query_object_label")
+        or "组合汇总"
+    ).strip() or "组合汇总"
+    prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
+    return f'''
+SELECT
+  {sql_literal(object_label)} AS hotel_name,
+  {sql_literal(str((parsed.get("query_plan") or {}).get("query_object_type") or "portfolio"))} AS area,
+  COUNT(*) AS portfolio_member_count,
+  SUM({prefix}TOTAL_INCOME_MTD_A) AS total_income_actual,
+  SUM({prefix}TOTAL_INCOME_MTD_B) AS total_income_budget,
+  SUM({prefix}TOTAL_INCOME_MTD_L) AS total_income_last_year,
+  SUM({prefix}ROOM_INCOME_MTD_A) AS room_income_actual,
+  SUM({prefix}ROOM_INCOME_MTD_B) AS room_income_budget,
+  SUM({prefix}ROOM_INCOME_MTD_L) AS room_income_last_year,
+  SUM({prefix}RESTAURANT_INCOME_MTD_A) AS restaurant_income_actual,
+  SUM({prefix}RESTAURANT_INCOME_MTD_B) AS restaurant_income_budget,
+  SUM({prefix}RESTAURANT_INCOME_MTD_L) AS restaurant_income_last_year,
+  SUM({prefix}BANQUET_INCOME_MTD_A) AS banquet_income_actual,
+  SUM({prefix}BANQUET_INCOME_MTD_B) AS banquet_income_budget,
+  SUM({prefix}BANQUET_INCOME_MTD_L) AS banquet_income_last_year,
+  SUM({prefix}OTHER_DEPT_INCOME_MTD_A) AS other_dept_income_actual,
+  SUM({prefix}OTHER_RATE_INCOME_MTD_A) AS other_rate_income_actual,
+  SUM({prefix}OPERATING_PROFIT_MTD_A) AS operating_profit_actual,
+  SUM({prefix}OPERATING_PROFIT_MTD_B) AS operating_profit_budget,
+  SUM({prefix}OPERATING_PROFIT_MTD_L) AS operating_profit_last_year,
+  SUM({prefix}OWNER_PROFIT_MTD_A) AS owner_profit_actual,
+  SUM({prefix}ROOM_PROFIT_MTD_A) AS room_profit_actual,
+  SUM({prefix}RESTAURANT_PROFIT_MTD_A) AS restaurant_profit_actual,
+  SUM({prefix}RENTAL_ROOMS_NUM_MTD_A) AS rental_rooms_actual,
+  AVG({prefix}AVE_HOUSE_PRICE_MTD_A) AS adr_actual,
+  AVG({prefix}AVE_HOUSE_PRICE_MTD_B) AS adr_budget,
+  AVG({prefix}AVE_HOUSE_PRICE_MTD_L) AS adr_last_year,
+  AVG({prefix}OCCUPANCY_RATE_MTD_A) AS occupancy_rate_actual,
+  AVG({prefix}OCCUPANCY_RATE_MTD_B) AS occupancy_rate_budget,
+  AVG({prefix}OCCUPANCY_RATE_MTD_L) AS occupancy_rate_last_year,
+  AVG({prefix}INCOME_PER_ROOM_MTD_A) AS revpar_actual,
+  AVG({prefix}INCOME_PER_ROOM_MTD_B) AS revpar_budget,
+  AVG({prefix}INCOME_PER_ROOM_MTD_L) AS revpar_last_year,
+  SUM({prefix}ROOM_COST_MTD_A) AS room_cost_actual,
+  SUM({prefix}RESTAURANT_COST_MTD_A) AS restaurant_cost_actual,
+  SUM({prefix}FOOD_COST_MTD_A) AS food_cost_actual,
+  SUM({prefix}WINE_COSE_MTD_A) AS wine_cost_actual,
+  SUM({prefix}ADMINI_EXPENSES_MTD_A) AS admin_expenses_actual,
+  SUM({prefix}ENERGY_EXPENSES_MTD_A) AS energy_expenses_actual,
+  SUM({prefix}PEOPLE_COST_MTD_A) AS people_cost_actual,
+  SUM({actual_field}) AS actual_value,
+  SUM({compare_field}) AS compare_value,
+  (SUM({actual_field}) - SUM({compare_field})) AS diff_value,
+  (SUM({actual_field}) - SUM({compare_field})) / NULLIF(SUM({compare_field}), 0) AS diff_rate
+FROM {query_parts["from_clause"]}
+WHERE {" AND ".join(where_clauses)}
+'''.strip()
+
+
 def build_explain_sql(
     parsed: dict,
     allowed_hotels: list[str] | None = None,
@@ -557,6 +686,16 @@ def summarize_rows(parsed: dict, rows: list[dict]) -> str:
     if not rows:
         return f"{metric_name} 在 {time_scope} 未查询到结果。"
     first_row = rows[0]
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    if query_plan.get("query_grain") == "portfolio":
+        object_label = query_plan.get("query_object_label") or first_row.get("hotel_name") or "当前组合"
+        member_count = first_row.get("portfolio_member_count")
+        actual_value = first_row.get("actual_value")
+        compare_value = first_row.get("compare_value")
+        return (
+            f"{object_label} 在 {time_scope} 已完成组合汇总分析，"
+            f"样本 {member_count or 'N/A'} 家，实际值 {actual_value}，对比值 {compare_value}。"
+        )
     hotel_name = first_row.get("hotel_name")
     actual_value = first_row.get("actual_value")
     compare_value = first_row.get("compare_value")
@@ -747,19 +886,29 @@ def ai_query(payload: QueryRequest):
     )
     timings["metric_ms"] = elapsed_ms(stage_started)
 
+    resolved_requested_hotels = effective_requested_hotels(parsed)
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
     sql_text = (
         build_explain_sql(
             parsed,
             auth_scope.get("allowed_hotels", []),
-            parsed.get("requested_hotels", []),
+            resolved_requested_hotels,
             parsed.get("requested_areas", []),
         )
         if parsed.get("intent") == "explain"
+        else build_portfolio_sql(
+            metric_def,
+            parsed,
+            auth_scope.get("allowed_hotels", []),
+            resolved_requested_hotels,
+            parsed.get("requested_areas", []),
+        )
+        if query_plan.get("query_grain") == "portfolio"
         else build_sql(
             metric_def,
             parsed,
             auth_scope.get("allowed_hotels", []),
-            parsed.get("requested_hotels", []),
+            resolved_requested_hotels,
             parsed.get("requested_areas", []),
         )
     )
@@ -810,7 +959,7 @@ def ai_query(payload: QueryRequest):
         )
     row_count = len(rows)
     internal_benchmark = None
-    if parsed.get("intent") != "explain" and rows:
+    if parsed.get("intent") != "explain" and rows and query_plan.get("query_grain") != "portfolio":
         try:
             internal_benchmark = build_internal_benchmark(rows, metric_def, parsed)
         except HTTPException as exc:

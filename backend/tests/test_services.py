@@ -125,6 +125,19 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("酒水成本", result["requested_accounts"])
         self.assertEqual(result["intent"], "explain")
 
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_builds_query_plan_for_hotel_group_overview(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(question="查一下1月份富力所有酒店的总体经营情况", time_scope="202601")
+            )
+        self.assertEqual(result["time_scope"], "202601")
+        self.assertEqual(result["query_plan"]["query_object_type"], "hotel_group")
+        self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
+        self.assertEqual(result["query_plan"]["analysis_mode"], "portfolio_overview")
+        self.assertGreaterEqual(result["query_plan"]["resolved_hotel_count"], 2)
+        self.assertEqual(result["resolved_entities"]["hotel_group"]["group_token"], "富力")
+
     @unittest.skipIf(metric_main is None, f"metric-service deps missing: {metric_error}")
     def test_metric_alias_lookup(self):
         result = metric_main.get_metric("revenue")
@@ -325,6 +338,32 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("AVG(o.INCOME_PER_ROOM_MTD_A)", sql)
         self.assertIn("AVG(o.OPERATING_PROFIT_MTD_A / NULLIF(o.TOTAL_INCOME_MTD_A, 0))", sql)
         self.assertIn("NOT (", sql)
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_portfolio_sql_aggregates_group_scope(self):
+        sql = ai_query_main.build_portfolio_sql(
+            {
+                "source_table": "wddm_dim_overview_cockpit_f",
+                "period_fields": {
+                    "MTD": {
+                        "actual": "OPERATING_PROFIT_MTD_A",
+                        "budget": "OPERATING_PROFIT_MTD_B",
+                        "last_year": "OPERATING_PROFIT_MTD_L",
+                    }
+                },
+            },
+            {
+                "period_type": "MTD",
+                "compare_mode": "budget",
+                "time_scope": "202601",
+                "query_plan": {"query_object_label": "富力体系酒店集合", "query_object_type": "hotel_group", "query_grain": "portfolio"},
+            },
+            requested_hotels=["广州富力丽思卡尔顿酒店及公寓", "香水湾富力万豪度假酒店"],
+        )
+        self.assertIn("'富力体系酒店集合' AS hotel_name", sql)
+        self.assertIn("COUNT(*) AS portfolio_member_count", sql)
+        self.assertIn("SUM(o.TOTAL_INCOME_MTD_A) AS total_income_actual", sql)
+        self.assertIn("SUM(o.OPERATING_PROFIT_MTD_A) AS actual_value", sql)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_external_benchmark_stub_returns_provider_metadata(self):

@@ -64,5 +64,5 @@ defaults:
   time_scope: "202601"
   period_type: MTD
   intent: query
-  compare_mode: actual
+  compare_mode: yoy
   default_metric_code: TOTAL_INCOME

@@ -5,7 +5,7 @@ cases:
     expected:
       skill_id: hotel_income_overview
       metric_code: TOTAL_INCOME
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 广州丽思卡尔顿酒店
@@ -24,7 +24,7 @@ cases:
     expected:
       skill_id: hotel_income_overview
       metric_code: TOTAL_INCOME
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 广州丽思卡尔顿公寓
@@ -44,7 +44,7 @@ cases:
     expected:
       skill_id: hotel_operation_overview
       metric_code: OPERATING_PROFIT
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 江门嘉华
@@ -65,7 +65,7 @@ cases:
     expected:
       skill_id: hotel_operation_overview
       metric_code: OPERATING_PROFIT
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202601"
       requested_hotels:
         - 北京富力万丽酒店
@@ -147,7 +147,7 @@ cases:
     expected:
       skill_id: hotel_income_overview
       metric_code: TOTAL_INCOME
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202601"
       requested_hotels: []
       requested_areas:
@@ -164,7 +164,7 @@ cases:
     expected:
       skill_id: hotel_income_overview
       metric_code: TOTAL_INCOME
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 广州柏悦
@@ -181,7 +181,7 @@ cases:
     expected:
       skill_id: hotel_profit_overview
       metric_code: OPERATING_PROFIT
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 江门嘉华

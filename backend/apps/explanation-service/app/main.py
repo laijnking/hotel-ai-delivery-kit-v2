@@ -22,6 +22,7 @@ class Req(BaseModel):
     rows: list[dict[str, Any]]
     portfolio_breakdown: list[dict[str, Any]] = []
     portfolio_outliers: dict[str, Any] | None = None
+    dimension_breakdowns: dict[str, list[dict[str, Any]]] = {}
     peer_benchmark: dict[str, Any] | None = None
     external_benchmark_requested: bool = False
 
@@ -32,6 +33,7 @@ class ReportReq(BaseModel):
     rows: list[dict[str, Any]]
     portfolio_breakdown: list[dict[str, Any]] = []
     portfolio_outliers: dict[str, Any] | None = None
+    dimension_breakdowns: dict[str, list[dict[str, Any]]] = {}
     peer_benchmark: dict[str, Any] | None = None
     external_benchmark_requested: bool = False
 
@@ -235,6 +237,88 @@ def _build_executive_sections(conclusion: str, risks: list[str], suggestions: li
     ]
 
 
+def _format_ranked_rows(rows: list[dict[str, Any]], *, key: str, label: str, limit: int = 5, reverse: bool = True) -> str | None:
+    valid_rows = [row for row in rows if row.get("hotel_name") and isinstance(row.get(key), (int, float))]
+    if not valid_rows:
+        return None
+    ranked = sorted(valid_rows, key=lambda item: item.get(key) or 0, reverse=reverse)[:limit]
+    parts = [
+        f"{index}. {row.get('hotel_name')} {label}{_format_amount(row.get(key))}"
+        for index, row in enumerate(ranked, 1)
+    ]
+    return "；".join(parts) + "。"
+
+
+def _build_portfolio_ranking_text(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "当前组合明细不足，暂不能形成酒店排名、梯队或异常样本。"
+    ranking_parts = [
+        _format_ranked_rows(rows, key="total_income_actual", label="总收入 "),
+        _format_ranked_rows(rows, key="operating_profit_actual", label="经营利润 "),
+        _format_ranked_rows(rows, key="revpar_actual", label="RevPAR "),
+        _format_ranked_rows(rows, key="diff_value", label="差额 ", reverse=False),
+    ]
+    ranking_parts = [item for item in ranking_parts if item]
+    return " ".join(ranking_parts) if ranking_parts else "当前组合明细已返回，但缺少可用于排名的收入、利润、RevPAR 或差额字段。"
+
+
+def _build_portfolio_tier_text(rows: list[dict[str, Any]]) -> str:
+    profit_rows = [row for row in rows if isinstance(row.get("operating_profit_actual"), (int, float))]
+    if not profit_rows:
+        return "当前组合明细未包含经营利润，暂不能按 NOP/经营利润形成梯队。"
+    tiers = [
+        ("2000万以上", lambda value: value >= 20_000_000),
+        ("1000万-2000万", lambda value: 10_000_000 <= value < 20_000_000),
+        ("500万-1000万", lambda value: 5_000_000 <= value < 10_000_000),
+        ("200万-500万", lambda value: 2_000_000 <= value < 5_000_000),
+        ("0-200万", lambda value: 0 <= value < 2_000_000),
+        ("亏损", lambda value: value < 0),
+    ]
+    parts: list[str] = []
+    for label, predicate in tiers:
+        matched = [row for row in profit_rows if predicate(float(row.get("operating_profit_actual") or 0))]
+        if matched:
+            total = sum(float(row.get("operating_profit_actual") or 0) for row in matched)
+            parts.append(f"{label} {len(matched)} 家，合计经营利润 {_format_amount(total)}")
+    return "；".join(parts) + "。" if parts else "当前组合明细未形成有效经营利润梯队。"
+
+
+def _build_report_style_sections(
+    summary: str,
+    risks: list[str],
+    suggestions: list[str],
+    parsed_intent: dict[str, Any] | None,
+    row: dict[str, Any],
+    portfolio_breakdown: list[dict[str, Any]] | None,
+    portfolio_outliers: dict[str, Any] | None,
+    peer_benchmark: dict[str, Any] | None,
+    external_benchmark_requested: bool,
+) -> list[dict[str, Any]]:
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    scope_label = _scope_label(parsed_intent, str(row.get("hotel_name") or "当前范围"))
+    period = str(parsed_intent.get("time_scope") or "当前期间") if isinstance(parsed_intent, dict) else "当前期间"
+    compare_scope = _compare_scope_label(parsed_intent)
+    member_count = row.get("portfolio_member_count") or query_plan.get("resolved_hotel_count") or "N/A"
+    ranking_text = _build_portfolio_ranking_text(portfolio_breakdown or [])
+    tier_text = _build_portfolio_tier_text(portfolio_breakdown or [])
+    outlier_text = _portfolio_outlier_text(portfolio_outliers) or "当前未形成明确异常样本，可继续按收入、利润、RevPAR 或成本率筛选。"
+    benchmark_text = _build_benchmark_text(row, None, peer_benchmark, external_benchmark_requested)
+    follow_up_text = "；".join(suggestions[:3]) + "。" if suggestions else "可以继续追问经营摘要、收入结构、利润成本效率或重点酒店。"
+    return [
+        {
+            "title": "分析范围",
+            "content": f"{period}，{scope_label}，样本 {member_count} 家。{summary}",
+        },
+        {"title": "经营总览", "content": f"总收入 {_format_amount(row.get('total_income_actual'))}；经营利润 {_format_amount(row.get('operating_profit_actual'))}；经营利润率 {_ratio_text(row.get('operating_profit_actual'), row.get('total_income_actual'))}；对{compare_scope}差额 {_format_amount(row.get('diff_value'))}，差异率 {_format_percent(row.get('diff_rate'))}。"},
+        {"title": "收入质量", "content": risks[0] if len(risks) > 0 else _build_income_quality_text(row)},
+        {"title": "客房效率", "content": risks[1] if len(risks) > 1 else _build_room_efficiency_text(row)},
+        {"title": "利润质量", "content": risks[2] if len(risks) > 2 else _build_profit_quality_text(row)},
+        {"title": "成本效率", "content": risks[3] if len(risks) > 3 else _build_cost_efficiency_text(row)},
+        {"title": "重点酒店与梯队", "content": f"{ranking_text} {tier_text} {outlier_text}"},
+        {"title": "横向对标与继续追问", "content": f"{benchmark_text} 可继续问：{follow_up_text}"},
+    ]
+
+
 def _scope_label(parsed_intent: dict[str, Any] | None, fallback: str = "当前范围") -> str:
     query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
     return str(query_plan.get("query_object_label") or fallback).strip() or fallback
@@ -387,6 +471,17 @@ def _direction_label(parsed_intent: dict[str, Any]) -> str:
     return "实际值减对比值"
 
 
+def _compare_scope_label(parsed_intent: dict[str, Any] | None) -> str:
+    compare_mode = parsed_intent.get("compare_mode") if isinstance(parsed_intent, dict) else None
+    if compare_mode == "budget":
+        return "预算"
+    if compare_mode == "yoy":
+        return "去年同期"
+    if compare_mode == "actual":
+        return "当前口径"
+    return "对比口径"
+
+
 def _valid_diff_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row.get("diff_value"), (int, float)) or isinstance(row.get("diff_rate"), (int, float))]
 
@@ -513,16 +608,17 @@ def _build_metric_response(
     portfolio_insight = _portfolio_breakdown_text(portfolio_breakdown or [])
     outlier_text = _portfolio_outlier_text(portfolio_outliers)
     direction_text = _direction_label(parsed_intent or {})
+    compare_scope = _compare_scope_label(parsed_intent)
     if query_plan.get("query_grain") == "portfolio":
         member_count = first.get("portfolio_member_count")
         summary = (
             f"当前已按 {query_plan.get('query_object_label') or hotel_name} 做组合汇总拆解；"
-            f"本次组合样本 {member_count or 'N/A'} 家，组合层面的差额 {diff_value}，差异率约 {diff_rate}。"
+            f"本次组合样本 {member_count or 'N/A'} 家，对{compare_scope}的组合层面差额 {diff_value}，差异率约 {diff_rate}。"
         )
     else:
         summary = (
             f"当前仅基于 {metric_name} 的实际值、对比值、差额和差异率做客观拆解；"
-            f"共返回 {len(rows)} 家酒店，样本首项为 {hotel_name}，差额 {diff_value}，差异率约 {diff_rate}。"
+            f"共返回 {len(rows)} 家酒店，样本首项为 {hotel_name}，对{compare_scope}差额 {diff_value}，差异率约 {diff_rate}。"
         )
     if peer_insight:
         summary = f"{summary} {peer_insight}"
@@ -535,7 +631,7 @@ def _build_metric_response(
         f"实际值：{actual_value}",
         f"对比值：{compare_value}",
         f"差额：{diff_value}",
-        f"口径说明：差额 = {direction_text}；正数通常代表高于对比口径，负数通常代表低于对比口径。",
+        f"口径说明：当前默认按{compare_scope}对比，差额 = {direction_text}；正数通常代表高于{compare_scope}，负数通常代表低于{compare_scope}。",
     ]
     weakest = [_format_hotel_row(row) for row in ranked_rows[:5]]
     if portfolio_breakdown:
@@ -582,7 +678,21 @@ def _build_metric_response(
         "weakest_hotels": weakest,
         "risks": risks,
         "suggestions": suggestions,
-        "report_sections": _build_executive_sections(summary, risks, suggestions),
+        "report_sections": (
+            _build_report_style_sections(
+                summary,
+                risks,
+                suggestions,
+                parsed_intent,
+                first,
+                portfolio_breakdown,
+                portfolio_outliers,
+                peer_benchmark,
+                external_benchmark_requested,
+            )
+            if query_plan.get("query_grain") == "portfolio"
+            else _build_executive_sections(summary, risks, suggestions)
+        ),
     }
 
 

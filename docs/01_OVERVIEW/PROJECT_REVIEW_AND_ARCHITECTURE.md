@@ -2,7 +2,7 @@
 
 本文档用于项目交付、团队接手和后续迭代。它总结当前版本的建设过程、系统目标、技术架构、数据链路、模型策略、调优方法和已知边界。
 
-补充说明：如果想先快速了解“当前实际代码架构、服务调用图、数据流和后续重构重点”，建议先阅读 `docs/ARCHITECTURE_OVERVIEW.md`。如果后续要把当前单链路问答架构演进为“高效率多 Agent 智能助手”，再结合 `docs/HIGH_EFFICIENCY_MULTI_AGENT_ARCHITECTURE.md` 一起阅读。后者重点定义了主控代理、意图规划、语义图谱、查询执行、经营分析、表达生成和学习闭环的职责边界，以及哪些步骤必须快、哪些步骤适合异步。若要查看第三阶段最近一轮“Learning Agent + External Benchmark Provider”具体做了什么、如何验证、当前结果是什么，可直接阅读 `docs/PHASE3_EXECUTION_LOG.md`。若要查看“酒店经营 AI 助手如何在基础交互体验上向 ChatGPT 看齐”的差距、产品需求和优先级拆解，可直接阅读 `docs/CHATGPT_EXPERIENCE_ALIGNMENT_PLAN.md`。从现在开始，`docs/` 目录统一按 `docs/DOCUMENTATION_STANDARDS.md` 进行规范管理，目录入口见 `docs/README.md`。
+补充说明：如果想先快速了解“当前实际代码架构、服务调用图、数据流和后续重构重点”，建议先阅读 `ARCHITECTURE_OVERVIEW.md`。如果后续要把当前单链路问答架构演进为“高效率多 Agent 智能助手”，再结合 `../02_ARCHITECTURE_EVOLUTION/HIGH_EFFICIENCY_MULTI_AGENT_ARCHITECTURE.md` 一起阅读。后者重点定义了主控代理、意图规划、语义图谱、查询执行、经营分析、表达生成和学习闭环的职责边界，以及哪些步骤必须快、哪些步骤适合异步。若要查看第三阶段最近一轮“Learning Agent + External Benchmark Provider”具体做了什么、如何验证、当前结果是什么，可直接阅读 `../06_EXECUTION_LOGS/PHASE3_EXECUTION_LOG.md`。若要查看“酒店经营 AI 助手如何在基础交互体验上向 ChatGPT 看齐”的差距、产品需求和优先级拆解，可直接阅读 `../05_PRODUCT_EXPERIENCE/CHATGPT_EXPERIENCE_ALIGNMENT_PLAN.md`。从现在开始，`docs/` 目录统一按 `../99_DOCUMENTATION_GOVERNANCE/DOCUMENTATION_STANDARDS.md` 进行规范管理，目录入口见 `../README.md`。
 
 ## 1. 项目目标
 
@@ -429,4 +429,4 @@ npm run test:e2e -- --timeout=30000
 5. 接入更严格的权限范围和用户体系。
 6. 增加生产化部署文档和监控方案。
 
-如果继续推进自学习和配置治理，建议参考 `docs/SKILL_HARNESS_EVOLUTION_PLAN.md`。该文档给出了 Skill Registry、Harness 评测、Learning Inbox、基础数据实体化和受控发布机制的下一阶段设计。
+如果继续推进自学习和配置治理，建议参考 `../03_SEMANTIC_AND_MODEL/SKILL_HARNESS_EVOLUTION_PLAN.md`。该文档给出了 Skill Registry、Harness 评测、Learning Inbox、基础数据实体化和受控发布机制的下一阶段设计。

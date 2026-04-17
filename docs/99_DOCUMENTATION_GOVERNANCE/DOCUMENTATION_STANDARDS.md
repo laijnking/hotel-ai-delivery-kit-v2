@@ -18,6 +18,21 @@
 4. 可区分层级  
    总览文档、专题设计、执行记录、部署说明不能混在一起。
 
+## 1.1 当前编号目录规则
+
+`docs/` 根目录只保留 `README.md` 作为总入口，其余文档按编号目录归档：
+
+- `01_OVERVIEW`：项目总览、代码架构、阶段总结。
+- `02_ARCHITECTURE_EVOLUTION`：架构演进、报告模板、多 Agent、业务 PPT 驱动方案。
+- `03_SEMANTIC_AND_MODEL`：语义层、模型边界、Skill / Harness / Hermes。
+- `04_DATA_AND_BENCHMARK`：本地数据仓、外部行业对标。
+- `05_PRODUCT_EXPERIENCE`：前端体验、ChatGPT 交互对齐、管理层移动端体验。
+- `06_EXECUTION_LOGS`：阶段执行记录。
+- `07_OPERATIONS_DELIVERY`：启动、部署、性能、交付和演示。
+- `99_DOCUMENTATION_GOVERNANCE`：文档规范和治理规则。
+
+新增文档时，应优先放入已有编号目录；只有出现稳定的新文档类别时，才新增编号目录，并同步更新 `docs/README.md`。
+
 ## 2. 文档分类规则
 
 `docs/` 下文档统一分为四类：
@@ -221,17 +236,19 @@
 
 当前 `docs/` 可按如下理解：
 
-- `PROJECT_REVIEW_AND_ARCHITECTURE.md`
+- `README.md`
+  文档总入口和编号目录索引
+- `01_OVERVIEW/PROJECT_REVIEW_AND_ARCHITECTURE.md`
   项目总入口
-- `ARCHITECTURE_OVERVIEW.md`
+- `01_OVERVIEW/ARCHITECTURE_OVERVIEW.md`
   代码架构总览
-- `HIGH_EFFICIENCY_MULTI_AGENT_ARCHITECTURE.md`
+- `02_ARCHITECTURE_EVOLUTION/HIGH_EFFICIENCY_MULTI_AGENT_ARCHITECTURE.md`
   多 Agent 演进主方案
-- `PHASE3_EXECUTION_LOG.md`
+- `06_EXECUTION_LOGS/PHASE3_EXECUTION_LOG.md`
   最近一轮阶段执行记录
-- `EXTERNAL_BENCHMARK_PROVIDER.md`
+- `04_DATA_AND_BENCHMARK/EXTERNAL_BENCHMARK_PROVIDER.md`
   外部对标专题设计
-- `LOCAL_STARTUP.md` / `DEPLOYMENT_NOTES.md`
+- `07_OPERATIONS_DELIVERY/LOCAL_STARTUP.md` / `07_OPERATIONS_DELIVERY/DEPLOYMENT_NOTES.md`
   启动与部署说明
 
 ## 10. 规范结论

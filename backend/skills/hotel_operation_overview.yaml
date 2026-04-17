@@ -2,7 +2,7 @@ id: hotel_operation_overview
 name: 酒店经营总览
 version: 1
 enabled: true
-description: 回答单店、多店或区域某月份经营整体情况，默认以经营利润为锚点，同时带出收入结构、客房效率、利润质量、成本效率和横向对标。
+description: 回答单店、多店或区域某月份经营整体情况，默认以经营利润为锚点，并默认与去年同期对比，同时带出收入结构、客房效率、利润质量、成本效率和横向对标。
 
 triggers:
   - 经营情况怎么样
@@ -19,7 +19,7 @@ triggers:
 defaults:
   intent: query
   metric_code: OPERATING_PROFIT
-  compare_mode: budget
+  compare_mode: yoy
   variance_direction: all
   period_type: MTD
 
@@ -51,7 +51,7 @@ examples:
   - question: 北京富力万丽酒店1月的经营情况怎么样？
     expected:
       metric_code: OPERATING_PROFIT
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202601"
       requested_hotels:
         - 北京富力万丽酒店

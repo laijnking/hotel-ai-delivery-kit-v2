@@ -77,6 +77,23 @@ const FALLBACK_QUICK_QUESTIONS = [
 const LOADING_STEPS = ["已理解问题", "读取经营数据", "生成经营拆解", "准备追问建议"];
 const CONVERSATION_STORAGE_KEY = "hotel-ai-conversations";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "hotel-ai-active-conversation";
+const SECTION_TITLE_OBSERVATION = "\u7ecf\u8425\u89c2\u5bdf";
+const SECTION_TITLE_MANAGEMENT = "\u7ba1\u7406\u5c42\u901f\u89c8";
+const SECTION_TITLE_ANALYSIS = "\u5206\u5c42\u5206\u6790";
+const SECTION_TITLES_MANAGEMENT_ORDER = [
+  "\u5206\u6790\u8303\u56f4",
+  "\u7ecf\u8425\u603b\u89c8",
+  "\u6536\u5165\u8d28\u91cf",
+  "\u5ba2\u623f\u6548\u7387",
+  "\u5229\u6da6\u8d28\u91cf",
+  "\u6210\u672c\u6548\u7387",
+  "\u91cd\u70b9\u9152\u5e97\u4e0e\u68af\u961f",
+  "\u6a2a\u5411\u5bf9\u6807",
+  "\u6a2a\u5411\u5bf9\u6807\u4e0e\u7ee7\u7eed\u8ffd\u95ee",
+  "\u7ed3\u8bba",
+  "\u98ce\u9669",
+  "\u5efa\u8bae",
+];
 const EMPTY_CONTEXT: ConversationContext = {
   lastQuestion: null,
   lastMetric: null,
@@ -278,10 +295,42 @@ function hasDetailedSections(result: any) {
 
 function getExecutiveSummaryLine(result: any) {
   const sections = getPrimarySections(result);
-  const conclusion = sections.find((item: any) => item.title === "结论");
-  const risk = sections.find((item: any) => item.title === "风险");
+  const conclusion = sections.find((item: any) => item.title === "\u7ed3\u8bba");
+  const risk = sections.find((item: any) => item.title === "\u98ce\u9669");
   if (!conclusion && !risk) return null;
   return [conclusion?.content, risk?.content].filter(Boolean).join(" ");
+}
+
+function getManagementSections(result: any) {
+  const sections = getPrimarySections(result);
+  if (!sections.length) return [];
+
+  const preferredTitles = [
+    "ç»è¥æ€»è§ˆ",
+    "æ”¶å…¥è´¨é‡",
+    "å®¢æˆ¿æ•ˆçŽ‡",
+    "åˆ©æ¶¦è´¨é‡",
+    "æˆæœ¬æ•ˆçŽ‡",
+    "é‡ç‚¹é…’åº—ä¸Žæ¢¯é˜Ÿ",
+    "æ¨ªå‘å¯¹æ ‡ä¸Žç»§ç»­è¿½é—®",
+    "ç»“è®º",
+    "é£Žé™©",
+    "å»ºè®®",
+  ];
+
+  return sections
+    .map((section: any, index: number) => ({
+      section,
+      score: SECTION_TITLES_MANAGEMENT_ORDER.indexOf(String(section?.title || "")),
+      index,
+    }))
+    .sort((left, right) => {
+      const leftScore = left.score === -1 ? 999 + left.index : left.score;
+      const rightScore = right.score === -1 ? 999 + right.index : right.score;
+      return leftScore - rightScore;
+    })
+    .map((item) => item.section)
+    .slice(0, 5);
 }
 
 function extractContext(result: any, question: string): ConversationContext {
@@ -342,6 +391,9 @@ function getDataSourceLabel(result: any) {
 }
 
 function getMetricLabel(result: any) {
+  const metricCode = String(result?.parsed_intent?.metric_code || result?.metric_definition?.metric_code || "");
+  if (metricCode === "OPERATING_PROFIT") return "\u7ecf\u8425\u5229\u6da6\uff08GOP\uff09";
+  if (metricCode === "OWNER_PROFIT") return "\u4e1a\u4e3b\u5229\u6da6\uff08\u7ecf\u8425\u51c0\u5229\u6da6\uff09";
   return result?.metric_definition?.name_cn || result?.parsed_intent?.metric_code || "经营指标";
 }
 
@@ -372,6 +424,9 @@ function getAnalysisModeLabel(value: unknown) {
   if (text === "management_report") return "管理摘要";
   if (text === "driver_analysis") return "归因分析";
   if (text === "ranking_overview") return "排名概览";
+  if (text === "budget") return "预算对比";
+  if (text === "yoy") return "去年同期";
+  if (text === "actual") return "实际表现";
   return text || "系统默认";
 }
 
@@ -828,6 +883,11 @@ function ResultCard({
   const isPortfolio = String(result?.parsed_intent?.query_plan?.query_grain || "") === "portfolio";
   const portfolioMemberCount = getPortfolioMemberCount(result);
   const portfolioOutlierItems = getPortfolioOutlierItems(result);
+  const managementSections = getManagementSections(result);
+  const showInlineManagementSections = !showTechnicalDetails && managementSections.length > 0;
+  const compareModeLabel = getAnalysisModeLabel(result?.parsed_intent?.compare_mode || "system_default");
+  const compareBasisLine = `当前默认按${compareModeLabel}对比，差额表示实际值减对应对比口径。`;
+  const sampleCountLabel = isPortfolio ? formatNumber(portfolioMemberCount) : formatNumber(result?.data_points?.length);
   return (
     <div className="result-card" data-testid="result-card">
       <div className="assistant-card-head">
@@ -837,6 +897,11 @@ function ResultCard({
         </div>
         <span className="source-pill">{getDataSourceLabel(result)}</span>
       </div>
+
+      {false ? <div className="result-block" data-testid="management-observation">
+        <div className="result-block-title">ç»è¥è§‚å¯Ÿ</div>
+        <div className="executive-line">{observationText}</div>
+      </div> : null}
 
       {firstPoint ? (
         <div className="metric-strip" data-testid="primary-metric-strip">
@@ -859,18 +924,18 @@ function ResultCard({
         </div>
       ) : null}
 
-      {executiveLine ? (
+      {compareBasisLine ? (
         <div className="result-block" data-testid="executive-overview">
-          <div className="result-block-title">管理层速览</div>
-          <div className="executive-line">{executiveLine}</div>
+        <div className="result-block-title">{SECTION_TITLE_MANAGEMENT}</div>
+          <div className="executive-line">{compareBasisLine}</div>
         </div>
       ) : null}
 
       <div className="result-meta">
         <span className="meta-pill">指标：{getMetricLabel(result)}</span>
-        {result?.data_points ? <span className="meta-pill">样本：{result.data_points.length} 条</span> : null}
+        {sampleCountLabel !== "N/A" ? <span className="meta-pill">样本：{sampleCountLabel} 条</span> : null}
         {result?.data_source?.warehouse_manifest?.latest_month ? <span className="meta-pill">最新账期：{result.data_source.warehouse_manifest.latest_month}</span> : null}
-        {result?.parsed_intent?.compare_mode ? <span className="meta-pill">口径：{result.parsed_intent.compare_mode}</span> : null}
+        {result?.parsed_intent?.compare_mode ? <span className="meta-pill">口径：{compareModeLabel}</span> : null}
       </div>
 
       <div className="intent-strip" data-testid="recognized-scope">
@@ -881,6 +946,20 @@ function ResultCard({
           </div>
         ))}
       </div>
+
+      {showInlineManagementSections ? (
+        <div className="result-block" data-testid="management-sections">
+          <div className="result-block-title">åˆ†å±‚åˆ†æž</div>
+          <div className="management-section-grid">
+            {managementSections.map((section: any, index: number) => (
+              <section className="management-section-card" key={`${section.title}-${index}`} data-testid={`section-${section.title}`}>
+                <div className="management-section-title">{section.title}</div>
+                <div className="management-section-content">{section.content}</div>
+              </section>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <InternalBenchmarkCard benchmark={result?.internal_benchmark} />
       <ExternalBenchmarkCard benchmark={result?.external_benchmark} />
@@ -918,7 +997,7 @@ function ResultCard({
 
       {highlights.length ? (
         <div className="result-block" data-testid="risk-highlights">
-          <div className="result-block-title">经营观察</div>
+        <div className="result-block-title">{SECTION_TITLE_OBSERVATION}</div>
           <div className="chip-list">
             {highlights.map((item: string, index: number) => (
               <span className="info-chip" key={`${item}-${index}`}>
@@ -1036,6 +1115,7 @@ export default function App() {
 
   const isLoading = status === "loading";
   const showTechnicalDetails = role !== "GROUP_ADMIN";
+  const collapseConversationHistory = false && role === "GROUP_ADMIN";
   const quickQuestions = systemSettings?.quick_questions?.length ? systemSettings.quick_questions : FALLBACK_QUICK_QUESTIONS;
   const sortedConversations = useMemo(
     () => [...conversations].sort((a, b) => b.updatedAt - a.updatedAt),
@@ -1236,6 +1316,7 @@ export default function App() {
           <div className={`status-badge status-${status}`}>{status === "idle" ? "待输入" : status === "loading" ? "处理中" : status === "success" ? "已返回" : "有异常"}</div>
         </header>
 
+        {!collapseConversationHistory ? (
         <section className="conversation-panel panel" data-testid="conversation-panel">
           <div className="conversation-head">
             <div>
@@ -1269,6 +1350,45 @@ export default function App() {
             </div>
           ) : null}
         </section>
+        ) : (
+          <details className="conversation-history-drawer panel" data-testid="conversation-history-drawer">
+            <summary data-testid="conversation-history-toggle">查看会话历史</summary>
+            <section className="conversation-panel" data-testid="conversation-panel">
+              <div className="conversation-head">
+                <div>
+                  <div className="panel-title">会话历史</div>
+                  <div className="section-desc">不同主题彼此隔离，追问只承接当前会话。</div>
+                </div>
+                <button type="button" className="new-conversation-btn" onClick={createFreshConversation} data-testid="new-conversation">
+                  新会话
+                </button>
+              </div>
+              <div className="conversation-list" data-testid="conversation-list" aria-label="会话历史">
+                {sortedConversations.map((conversation) => (
+                  <button
+                    type="button"
+                    key={conversation.id}
+                    className={`conversation-item ${conversation.id === activeConversation.id ? "active" : ""}`}
+                    onClick={() => selectConversation(conversation.id)}
+                    data-testid="conversation-item"
+                  >
+                    <span className="conversation-title">{conversation.title}</span>
+                    <span className="conversation-meta">{getConversationMeta(conversation)}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </details>
+        )}
+
+        {collapseConversationHistory && contextSnapshotItems.length ? (
+          <div className="context-snapshot context-snapshot-inline" data-testid="context-snapshot">
+            <span className="context-snapshot-label">当前承接</span>
+            {contextSnapshotItems.map((item) => (
+              <span className="context-snapshot-item" key={item}>{item}</span>
+            ))}
+          </div>
+        ) : null}
 
         <div className="quick-strip">
           <QuickQuestions onSelect={(q) => void run(q, { useContextRewrite: false })} activeQuestion={question} disabled={isLoading} questions={quickQuestions} />

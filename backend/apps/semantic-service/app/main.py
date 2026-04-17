@@ -538,6 +538,7 @@ def find_hotel_group_token(question: str, scope: dict[str, list[str]]) -> str | 
     candidate = clean_hotel_name(match.group(1))
     candidate = re.sub(r"^(?:20\d{2}年)?\d{1,2}月(?:份)?", "", candidate).strip()
     candidate = re.sub(r"(?:查一下|看一下|看下|分析一下|了解一下|帮我|请|麻烦)$", "", candidate).strip()
+    candidate = re.sub(r"的$", "", candidate).strip()
     if not candidate or len(candidate) < 2:
         return None
     if candidate in {"哪些", "本月", "这个月", "经营", "总体", "整体"}:
@@ -547,6 +548,12 @@ def find_hotel_group_token(question: str, scope: dict[str, list[str]]) -> str | 
 
 def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str, object] | None:
     token = find_hotel_group_token(question, scope)
+    question_norm = normalize_text(question)
+    company_root_norms = {normalize_text(term) for term in _COMPANY_ROOT_TERMS}
+    if not token and "酒店" in question and any(term in question_norm for term in company_root_norms) and any(
+        normalize_text(term) in question_norm for term in _ALL_SCOPE_TERMS
+    ):
+        token = "公司"
     if not token:
         return None
     token_norm = normalize_text(token)
@@ -712,6 +719,29 @@ def is_portfolio_question(question_norm: str) -> bool:
     )
 
 
+def detect_group_by_dimensions(question: str) -> list[str]:
+    question_norm = normalize_text(question)
+    if not any(term in question_norm for term in ("维度", "分组", "汇总到", "汇总至", "按")):
+        return []
+
+    dimensions: list[str] = []
+
+    def append_unique(value: str) -> None:
+        if value not in dimensions:
+            dimensions.append(value)
+
+    if any(term in question_norm for term in ("管理公司", "管理方", "管理集团")):
+        append_unique("manage_corp")
+    if "区域" in question_norm:
+        append_unique("area")
+    if any(term in question_norm for term in ("品牌", "子品牌")):
+        append_unique("brand_child")
+    if "manage_corp" in dimensions and "area" in dimensions:
+        append_unique("manage_corp_area")
+
+    return dimensions
+
+
 def build_query_plan(question: str, result: dict) -> dict[str, object]:
     question_norm = normalize_text(question)
     resolved_entities = result.get("resolved_entities") if isinstance(result.get("resolved_entities"), dict) else build_resolved_entities(question, result)
@@ -725,6 +755,7 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
     metric_code = str(result.get("metric_code", "TOTAL_INCOME")).strip() or "TOTAL_INCOME"
     metric_name = _METRIC_LABELS.get(metric_code, metric_code)
     portfolio_like = is_portfolio_question(question_norm)
+    group_by_dimensions = detect_group_by_dimensions(question)
 
     if hotel_group:
         object_type = "hotel_group"
@@ -767,6 +798,10 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         analysis_mode = "management_report"
         themes = ["income_quality", "room_efficiency", "profit_quality", "cost_efficiency", "internal_benchmark"]
         execution_order = ["resolve_scope", "aggregate_metrics", "peer_benchmark", "compose_report"]
+    elif group_by_dimensions:
+        analysis_mode = "group_by_dimension_report"
+        themes = ["income_quality", "room_efficiency", "profit_quality", "cost_efficiency", "dimension_comparison"]
+        execution_order = ["resolve_scope", "aggregate_metrics", "group_by_dimensions", "identify_outliers", "compose_report"]
     elif query_grain == "portfolio":
         analysis_mode = "portfolio_overview"
         themes = ["income_quality", "room_efficiency", "profit_quality", "cost_efficiency", "internal_benchmark"]
@@ -820,6 +855,7 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         "query_object_label": object_label,
         "query_grain": query_grain,
         "analysis_mode": analysis_mode,
+        "group_by_dimensions": group_by_dimensions,
         "themes": themes,
         "execution_order": execution_order,
         "query_steps": query_steps,
@@ -937,7 +973,7 @@ def call_llm_parse(question: str, time_scope: str, cfg: dict) -> dict | None:
         "compare_mode 只能是 actual, budget, yoy。"
         "variance_direction 只能是 below, above, all；未达预算、下滑、低于用 below，高于、增长、超过用 above。"
         "经营情况、经营状况、经营表现这类宽泛问法，默认 metric_code 用 OPERATING_PROFIT，intent 用 query。"
-        "收入情况、利润情况、RevPAR情况、怎么样、如何这类问法，如果没有明确同比，compare_mode 默认用 budget。"
+        "收入情况、利润情况、RevPAR情况、怎么样、如何这类问法，如果没有明确同比或预算，compare_mode 默认用 yoy。"
         "你必须按数据结构输出字段：酒店范围 requested_hotels、区域 requested_areas、管理公司 requested_manage_corps、品牌/子品牌 requested_brand_children、建设来源 requested_builders、品牌档次 requested_brand_levels、城市等级 requested_city_levels、部门 requested_departments、科目 requested_accounts、月份 time_scope、指标 metric_code、口径 compare_mode。"
         "酒店名称只保留真实酒店名，不要带“看一下、帮我、3月、经营情况”等修饰词。"
         "如果用户要求摘要、晨报、报告，intent 用 report。"
@@ -974,8 +1010,8 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
             compare_mode = skill_compare
             matched_compare_term = f"skill:{matched_skill.get('id')}"
     if matched_metric_term and is_situation_question(question_norm) and not matched_compare_term:
-        compare_mode = "budget"
-        matched_compare_term = "默认预算对比"
+        compare_mode = "yoy"
+        matched_compare_term = "默认去年同期对比"
     variance_direction = extract_variance_direction(question_norm)
     skill_variance = str(skill_defaults.get("variance_direction", "")).strip()
     if matched_skill and skill_variance in {"below", "above", "all"} and variance_direction == "all":
@@ -1070,7 +1106,7 @@ def merge_rule_and_llm(rule_result: dict, llm_result: dict | None, cfg: dict) ->
         merged["metric_code"] = llm_metric
     if llm_intent in allowed_intents(cfg):
         merged["intent"] = llm_intent
-    rule_compare_is_default = rule_result.get("matched_terms", {}).get("compare") == "默认预算对比"
+    rule_compare_is_default = rule_result.get("matched_terms", {}).get("compare") == "默认去年同期对比"
     if llm_compare_mode in {"actual", "budget", "yoy"} and not (rule_compare_is_default and llm_compare_mode == "actual"):
         merged["compare_mode"] = llm_compare_mode
     if llm_variance_direction in {"below", "above", "all"}:

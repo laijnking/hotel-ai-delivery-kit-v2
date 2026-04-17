@@ -582,6 +582,7 @@ def build_overview_query_parts(source_table: str) -> dict[str, str]:
             "hotel_search_filter": "CONCAT_WS('|', COALESCE(s.hotel_name_s, ''), COALESCE(s.hotel_name_f, ''), COALESCE(o.hotel_name, ''))",
             "area_filter": "s.area",
             "manage_corp_filter": "CONCAT_WS('|', COALESCE(o.manage_corp, ''), COALESCE(s.brand, ''))",
+            "manage_corp_select": "COALESCE(o.manage_corp, s.brand)",
             "brand_child_filter": "CONCAT_WS('|', COALESCE(o.hotel_brand, ''), COALESCE(s.brand_child, ''))",
             "builder_filter": "s.Builder",
             "brand_level_filter": "s.brand_level",
@@ -604,6 +605,7 @@ def build_overview_query_parts(source_table: str) -> dict[str, str]:
         "hotel_search_filter": "HOTEL_NAME_s",
         "area_filter": "area",
         "manage_corp_filter": "brand",
+        "manage_corp_select": "brand",
         "brand_child_filter": "brand_child",
         "builder_filter": "Builder",
         "brand_level_filter": "brand_level",
@@ -936,6 +938,136 @@ def build_portfolio_breakdown(
     if not isinstance(detail_rows, list):
         return []
     return detail_rows[:5]
+
+
+def build_dimension_breakdown_sql(
+    metric_def: dict,
+    parsed: dict,
+    dimension: str,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> str:
+    source_table = safe_identifier(str(metric_def.get("source_table", "ads_hotel_operation_overview_wide")), "source_table")
+    query_parts = build_overview_query_parts(source_table)
+    period_fields = metric_def.get("period_fields", {})
+    if not isinstance(period_fields, dict) or not period_fields:
+        raise HTTPException(status_code=500, detail={"message": "metric definition is missing period_fields"})
+
+    requested_period = str(parsed.get("period_type", "MTD")).strip() or "MTD"
+    fields = period_fields.get(requested_period)
+    if not isinstance(fields, dict):
+        requested_period, fields = next(iter(period_fields.items()))
+    actual_field_name = safe_identifier(str(fields.get("actual", "")), "actual field")
+    compare_mode = str(parsed.get("compare_mode", "actual")).strip() or "actual"
+    if compare_mode == "yoy":
+        compare_source = fields.get("last_year") or fields.get("budget") or fields.get("actual")
+    elif compare_mode == "budget":
+        compare_source = fields.get("budget") or fields.get("last_year") or fields.get("actual")
+    else:
+        compare_source = fields.get("budget") or fields.get("last_year") or fields.get("actual")
+    compare_field_name = safe_identifier(str(compare_source), "compare field")
+
+    prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
+    actual_field = f"{prefix}{actual_field_name}"
+    compare_field = f"{prefix}{compare_field_name}"
+
+    dimension_selects = {
+        "manage_corp": [("manage_corp", query_parts["manage_corp_select"])],
+        "area": [("area", query_parts["area_filter"])],
+        "brand_child": [("brand_child", query_parts["brand_child_select"])],
+        "manage_corp_area": [
+            ("manage_corp", query_parts["manage_corp_select"]),
+            ("area", query_parts["area_filter"]),
+        ],
+    }
+    selected_dimensions = dimension_selects.get(dimension)
+    if not selected_dimensions:
+        raise HTTPException(status_code=400, detail={"message": "unsupported group_by dimension", "dimension": dimension})
+
+    time_scope = str(parsed.get("time_scope", "")).strip()
+    if not _TIME_SCOPE_RE.fullmatch(time_scope):
+        raise HTTPException(status_code=400, detail={"message": "invalid time_scope", "time_scope": time_scope})
+
+    where_clauses = [f"{query_parts['time_field']} = {sql_literal(time_scope)}"]
+    area_scope = [str(area).strip() for area in (requested_areas or []) if str(area).strip()]
+    if area_scope:
+        where_clauses.append(f"{query_parts['area_filter']} IN ({', '.join(sql_literal(area) for area in area_scope)})")
+
+    for parsed_key, query_key in [
+        ("requested_manage_corps", "manage_corp_filter"),
+        ("requested_brand_children", "brand_child_filter"),
+        ("requested_builders", "builder_filter"),
+        ("requested_brand_levels", "brand_level_filter"),
+        ("requested_city_levels", "city_level_filter"),
+    ]:
+        clause = dimension_scope_clause(query_parts[query_key], [str(item).strip() for item in parsed.get(parsed_key, []) if str(item).strip()])
+        if clause:
+            where_clauses.append(clause)
+
+    explicit_hotel_scope = [str(hotel).strip() for hotel in (requested_hotels or []) if str(hotel).strip()]
+    if explicit_hotel_scope:
+        hotel_clause = hotel_scope_clause(query_parts.get("hotel_search_filter", query_parts["hotel_filter"]), explicit_hotel_scope)
+        if hotel_clause:
+            where_clauses.append(hotel_clause)
+
+    hotel_scope = [str(hotel).strip() for hotel in (allowed_hotels or []) if str(hotel).strip()]
+    if hotel_scope and hotel_scope != ["ALL"]:
+        where_clauses.append(f"{query_parts['hotel_filter']} IN ({', '.join(sql_literal(hotel) for hotel in hotel_scope)})")
+
+    dimension_sql = ",\n  ".join(
+        f"COALESCE(NULLIF(TRIM({expression}), ''), '未标注') AS {alias}"
+        for alias, expression in selected_dimensions
+    )
+    group_by_sql = ", ".join(alias for alias, _ in selected_dimensions)
+
+    return f"""
+SELECT
+  {dimension_sql},
+  COUNT(*) AS hotel_count,
+  SUM({prefix}TOTAL_INCOME_MTD_A) AS total_income_actual,
+  SUM({prefix}TOTAL_INCOME_MTD_L) AS total_income_last_year,
+  SUM({prefix}TOTAL_INCOME_MTD_B) AS total_income_budget,
+  SUM({prefix}OPERATING_PROFIT_MTD_A) AS operating_profit_actual,
+  SUM({prefix}OPERATING_PROFIT_MTD_L) AS operating_profit_last_year,
+  SUM({prefix}OPERATING_PROFIT_MTD_B) AS operating_profit_budget,
+  SUM({prefix}OWNER_PROFIT_MTD_A) AS owner_profit_actual,
+  AVG({prefix}AVE_HOUSE_PRICE_MTD_A) AS adr_actual,
+  AVG({prefix}OCCUPANCY_RATE_MTD_A) AS occupancy_rate_actual,
+  AVG({prefix}INCOME_PER_ROOM_MTD_A) AS revpar_actual,
+  SUM({actual_field}) AS actual_value,
+  SUM({compare_field}) AS compare_value,
+  (SUM({actual_field}) - SUM({compare_field})) AS diff_value,
+  (SUM({actual_field}) - SUM({compare_field})) / NULLIF(SUM({compare_field}), 0) AS diff_rate
+FROM {query_parts["from_clause"]}
+WHERE {" AND ".join(where_clauses)}
+GROUP BY {group_by_sql}
+ORDER BY total_income_actual DESC, operating_profit_actual DESC
+LIMIT 100
+""".strip()
+
+
+def build_dimension_breakdowns(
+    metric_def: dict,
+    parsed: dict,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> dict[str, list[dict]]:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    dimensions = [str(item).strip() for item in query_plan.get("group_by_dimensions", []) if str(item).strip()]
+    breakdowns: dict[str, list[dict]] = {}
+    for dimension in dimensions:
+        sql = build_dimension_breakdown_sql(metric_def, parsed, dimension, allowed_hotels, requested_hotels, requested_areas)
+        result = request_json(
+            "POST",
+            f"{DB_EXECUTOR_SERVICE_URL}/api/v1/db/query",
+            {"sql": sql},
+            stage=f"db-executor-dimension-breakdown-{dimension}",
+        )
+        rows = result.get("rows", [])
+        breakdowns[dimension] = rows if isinstance(rows, list) else []
+    return breakdowns
 
 
 def _unique_non_empty(rows: list[dict], key: str) -> list[str]:
@@ -1693,7 +1825,8 @@ def ai_query(payload: QueryRequest):
     internal_benchmark = None
     portfolio_breakdown: list[dict] = []
     portfolio_outliers: dict[str, dict[str, object]] | None = None
-    if query_plan.get("query_grain") == "portfolio" and resolved_requested_hotels:
+    dimension_breakdowns: dict[str, list[dict]] = {}
+    if query_plan.get("query_grain") == "portfolio":
         try:
             portfolio_breakdown = build_portfolio_breakdown(
                 metric_def,
@@ -1710,6 +1843,17 @@ def ai_query(payload: QueryRequest):
                 internal_benchmark = build_portfolio_internal_benchmark(rows, portfolio_breakdown, metric_def, parsed)
             except HTTPException as exc:
                 warnings.append(f"portfolio benchmark fallback: {exc.detail}")
+        if query_plan.get("group_by_dimensions"):
+            try:
+                dimension_breakdowns = build_dimension_breakdowns(
+                    metric_def,
+                    parsed,
+                    auth_scope.get("allowed_hotels", []),
+                    resolved_requested_hotels,
+                    parsed.get("requested_areas", []),
+                )
+            except HTTPException as exc:
+                warnings.append(f"dimension breakdown fallback: {exc.detail}")
     if parsed.get("intent") != "explain" and rows and query_plan.get("query_grain") != "portfolio":
         try:
             internal_benchmark = build_internal_benchmark(rows, metric_def, parsed)
@@ -1742,6 +1886,7 @@ def ai_query(payload: QueryRequest):
                     "rows": rows,
                     "portfolio_breakdown": portfolio_breakdown,
                     "portfolio_outliers": portfolio_outliers,
+                    "dimension_breakdowns": dimension_breakdowns,
                     "peer_benchmark": internal_benchmark,
                     "external_benchmark_requested": payload.context.external_benchmark,
                 },
@@ -1827,6 +1972,7 @@ def ai_query(payload: QueryRequest):
         "portfolio_member_count": portfolio_member_count,
         "portfolio_breakdown": portfolio_breakdown,
         "portfolio_outliers": portfolio_outliers,
+        "dimension_breakdowns": dimension_breakdowns,
         "quick_filters": quick_filters,
         "internal_benchmark": internal_benchmark,
         "external_benchmark": external_benchmark,

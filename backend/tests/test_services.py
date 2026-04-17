@@ -57,7 +57,7 @@ class ServiceSmokeTests(unittest.TestCase):
         with patch.object(semantic_main, "call_llm_parse", return_value=None):
             result = semantic_main.parse(req)
         self.assertEqual(result["metric_code"], "OPERATING_PROFIT")
-        self.assertEqual(result["compare_mode"], "budget")
+        self.assertEqual(result["compare_mode"], "yoy")
         self.assertEqual(result["time_scope"], "202603")
         self.assertEqual(result["requested_hotels"], ["江门嘉华"])
         self.assertEqual(result["skill_id"], "hotel_operation_overview")
@@ -69,7 +69,7 @@ class ServiceSmokeTests(unittest.TestCase):
         with patch.object(semantic_main, "call_llm_parse", return_value=None):
             result = semantic_main.parse(req)
         self.assertEqual(result["metric_code"], "TOTAL_INCOME")
-        self.assertEqual(result["compare_mode"], "budget")
+        self.assertEqual(result["compare_mode"], "yoy")
         self.assertEqual(result["time_scope"], "202603")
         self.assertEqual(result["requested_hotels"], ["广州丽思卡尔顿酒店"])
         self.assertEqual(result["skill_id"], "hotel_income_overview")
@@ -83,15 +83,37 @@ class ServiceSmokeTests(unittest.TestCase):
             operation_result = semantic_main.parse(semantic_main.Req(question="北京富力万丽酒店1月的经营情况怎么样？", time_scope="202601"))
         self.assertEqual(income_result["skill_id"], "hotel_income_overview")
         self.assertEqual(income_result["metric_code"], "TOTAL_INCOME")
-        self.assertEqual(income_result["compare_mode"], "budget")
+        self.assertEqual(income_result["compare_mode"], "yoy")
         self.assertEqual(income_result["requested_hotels"], ["广州柏悦"])
         self.assertEqual(profit_result["skill_id"], "hotel_profit_overview")
         self.assertEqual(profit_result["metric_code"], "OPERATING_PROFIT")
-        self.assertEqual(profit_result["compare_mode"], "budget")
+        self.assertEqual(profit_result["compare_mode"], "yoy")
         self.assertEqual(profit_result["requested_hotels"], ["江门嘉华"])
         self.assertEqual(operation_result["skill_id"], "hotel_operation_overview")
         self.assertEqual(operation_result["metric_code"], "OPERATING_PROFIT")
         self.assertEqual(operation_result["requested_hotels"], ["北京富力万丽酒店"])
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_parse_company_all_hotels_as_portfolio_scope(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(semantic_main.Req(question="请分析一下3月份公司的所有酒店的经营情况", time_scope="202601"))
+        self.assertEqual(result["compare_mode"], "yoy")
+        self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
+        self.assertEqual(result["query_plan"]["query_object_type"], "hotel_group")
+        self.assertEqual(result["query_plan"]["query_object_label"], "公司全部酒店")
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_detects_management_area_group_by_dimensions(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(
+                    question="请分析一下公司所有酒店3月份的经营情况，请汇总到管理公司和区域维度输出",
+                    time_scope="202601",
+                )
+            )
+        self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
+        self.assertEqual(result["query_plan"]["analysis_mode"], "group_by_dimension_report")
+        self.assertEqual(result["query_plan"]["group_by_dimensions"], ["manage_corp", "area", "manage_corp_area"])
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_uses_entity_catalog_for_area_and_hotel(self):
@@ -420,6 +442,71 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertEqual(result, [])
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_company_all_hotels_portfolio_can_build_breakdown_without_hotel_filter(self):
+        with patch.object(ai_query_main, "request_json", return_value={"rows": [{"hotel_name": "长沙文华", "diff_value": 1}]} ) as mocked:
+            rows = ai_query_main.build_portfolio_breakdown(
+                {
+                    "source_table": "wddm_dim_overview_cockpit_f",
+                    "period_fields": {
+                        "MTD": {
+                            "actual": "OPERATING_PROFIT_MTD_A",
+                            "budget": "OPERATING_PROFIT_MTD_B",
+                            "last_year": "OPERATING_PROFIT_MTD_L",
+                        }
+                    },
+                },
+                {
+                    "period_type": "MTD",
+                    "compare_mode": "budget",
+                    "time_scope": "202601",
+                    "query_plan": {"query_object_label": "公司全部酒店", "query_object_type": "hotel_group", "query_grain": "portfolio"},
+                    "resolved_entities": {"hotel_group": {"group_token": "富力", "use_group_token_as_filter": False}},
+                },
+                allowed_hotels=["ALL"],
+                requested_hotels=[],
+                requested_areas=[],
+            )
+        self.assertEqual(rows, [{"hotel_name": "长沙文华", "diff_value": 1}])
+        sql = mocked.call_args.args[2]["sql"]
+        self.assertIn("WHERE o.CALMONTH = '202601'", sql)
+        self.assertNotIn("LIKE '%富力%'", sql)
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_dimension_breakdown_sql_groups_by_manage_corp_and_area(self):
+        sql = ai_query_main.build_dimension_breakdown_sql(
+            {
+                "source_table": "wddm_dim_overview_cockpit_f",
+                "period_fields": {
+                    "MTD": {
+                        "actual": "OPERATING_PROFIT_MTD_A",
+                        "budget": "OPERATING_PROFIT_MTD_B",
+                        "last_year": "OPERATING_PROFIT_MTD_L",
+                    }
+                },
+            },
+            {
+                "period_type": "MTD",
+                "compare_mode": "yoy",
+                "time_scope": "202603",
+                "query_plan": {
+                    "query_object_label": "公司全部酒店",
+                    "query_object_type": "hotel_group",
+                    "query_grain": "portfolio",
+                    "group_by_dimensions": ["manage_corp", "area", "manage_corp_area"],
+                },
+            },
+            "manage_corp_area",
+            allowed_hotels=["ALL"],
+            requested_hotels=[],
+            requested_areas=[],
+        )
+        self.assertIn("COALESCE(NULLIF(TRIM(COALESCE(o.manage_corp, s.brand)), ''), '未标注') AS manage_corp", sql)
+        self.assertIn("COALESCE(NULLIF(TRIM(s.area), ''), '未标注') AS area", sql)
+        self.assertIn("GROUP BY manage_corp, area", sql)
+        self.assertIn("SUM(o.OPERATING_PROFIT_MTD_A) AS actual_value", sql)
+        self.assertIn("SUM(o.OPERATING_PROFIT_MTD_L) AS compare_value", sql)
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_explain_sql_filters_pnl_hierarchy(self):
         sql = ai_query_main.build_explain_sql(
             {
@@ -521,8 +608,8 @@ class ServiceSmokeTests(unittest.TestCase):
                 "admin_expenses_actual": 50000.0,
             }],
             portfolio_breakdown=[
-                {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "actual_value": 500000, "compare_value": 400000, "diff_value": 100000, "diff_rate": 0.25},
-                {"hotel_name": "镇江富力喜来登酒店", "actual_value": -200000, "compare_value": 0, "diff_value": -200000, "diff_rate": None},
+                {"hotel_name": "广州富力丽思卡尔顿酒店及公寓", "actual_value": 500000, "compare_value": 400000, "diff_value": 100000, "diff_rate": 0.25, "operating_profit_actual": 260000},
+                {"hotel_name": "镇江富力喜来登酒店", "actual_value": -200000, "compare_value": 0, "diff_value": -200000, "diff_rate": None, "operating_profit_actual": -300000},
             ],
             portfolio_outliers={
                 "income": {
@@ -545,6 +632,13 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("广州富力丽思卡尔顿酒店及公寓", " ".join(result["weakest_hotels"]))
         self.assertGreaterEqual(len(result["management_summary"]), 2)
         self.assertIn("组合观察", result["management_summary"][0])
+        section_titles = [item["title"] for item in result["report_sections"]]
+        self.assertIn("经营总览", section_titles)
+        self.assertIn("重点酒店与梯队", section_titles)
+        self.assertIn("横向对标与继续追问", section_titles)
+        ranking_section = next(item for item in result["report_sections"] if item["title"] == "重点酒店与梯队")
+        self.assertIn("经营利润", ranking_section["content"])
+        self.assertIn("亏损", ranking_section["content"])
         self.assertEqual(len(result["suggestions"]), 3)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")

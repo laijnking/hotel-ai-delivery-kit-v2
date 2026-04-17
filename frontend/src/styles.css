@@ -135,6 +135,29 @@ button {
   gap: 12px;
 }
 
+.conversation-history-drawer {
+  padding: 12px 14px;
+}
+
+.conversation-history-drawer summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.prompt-stage {
+  padding: 12px 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.prompt-stage-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .conversation-head {
   display: flex;
   align-items: flex-start;
@@ -372,6 +395,51 @@ button {
   gap: 14px;
 }
 
+.management-section-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.management-section-card {
+  border-radius: 18px;
+  padding: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.92));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.management-section-title {
+  margin-bottom: 8px;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.management-section-content {
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+[data-testid="management-observation"] .result-block-title,
+[data-testid="management-sections"] .result-block-title {
+  font-size: 0;
+}
+
+[data-testid="management-observation"] .result-block-title::after {
+  content: "经营观察";
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+}
+
+[data-testid="management-sections"] .result-block-title::after {
+  content: "分层分析";
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+}
+
 .loading-card {
   display: grid;
   gap: 14px;
@@ -537,6 +605,10 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.context-snapshot-inline {
+  padding: 0;
 }
 
 .meta-pill {
@@ -977,6 +1049,10 @@ button {
   }
 
   .chat-header {
+    flex-direction: column;
+  }
+
+  .prompt-stage-head {
     flex-direction: column;
   }
 }

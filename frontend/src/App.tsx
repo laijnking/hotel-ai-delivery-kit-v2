@@ -20,7 +20,19 @@ type ConversationContext = {
   lastMetric: string | null;
   lastHotel: string | null;
   lastArea: string | null;
+  lastTimeScope: string | null;
+  lastScopeLabel: string | null;
+  lastCompareMode: string | null;
   lastSummary: string | null;
+};
+
+type Conversation = {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: Message[];
+  context: ConversationContext;
 };
 
 type SystemSettings = {
@@ -38,8 +50,10 @@ type QuestionFrame = {
   usedContext: boolean;
 };
 
+type AnalysisFocus = "driver_analysis" | "management_report" | "yoy_change" | "income_structure" | "profit_cost_efficiency" | null;
+
 const ROLE_OPTIONS: Array<{ value: Role; label: string }> = [
-  { value: "GROUP_ADMIN", label: "集团管理员" },
+  { value: "GROUP_ADMIN", label: "集团管理层" },
   { value: "AREA_MANAGER", label: "区域经理" },
   { value: "HOTEL_MANAGER", label: "单店经理" }
 ];
@@ -50,9 +64,9 @@ const ACTION_OPTIONS: Array<{ value: ActionMode; label: string }> = [
 ];
 
 const DEFAULT_QUESTION = "本月哪些酒店经营利润未达预算？";
-const DEFAULT_TIME_SCOPE = "202601";
-const DEFAULT_ROLE: Role = "AREA_MANAGER";
-const BASE_FOLLOW_UP_SUGGESTIONS = ["继续展开原因", "只看华南区", "换成经营摘要", "给我行动建议", "看同比变化"];
+const DEFAULT_ROLE: Role = "GROUP_ADMIN";
+const ROLE_STORAGE_KEY = "hotel-ai-role";
+const BASE_FOLLOW_UP_SUGGESTIONS = ["继续展开原因", "换成经营摘要", "看同比变化", "分析收入结构", "看利润和成本效率"];
 const FALLBACK_QUICK_QUESTIONS = [
   "本月哪些酒店经营利润未达预算？",
   "广州丽思卡尔顿酒店3月的收入情况怎么样？",
@@ -61,6 +75,111 @@ const FALLBACK_QUICK_QUESTIONS = [
   "生成华南区本月经营摘要"
 ];
 const LOADING_STEPS = ["已理解问题", "读取经营数据", "生成经营拆解", "准备追问建议"];
+const CONVERSATION_STORAGE_KEY = "hotel-ai-conversations";
+const ACTIVE_CONVERSATION_STORAGE_KEY = "hotel-ai-active-conversation";
+const EMPTY_CONTEXT: ConversationContext = {
+  lastQuestion: null,
+  lastMetric: null,
+  lastHotel: null,
+  lastArea: null,
+  lastTimeScope: null,
+  lastScopeLabel: null,
+  lastCompareMode: null,
+  lastSummary: null
+};
+const WELCOME_MESSAGE_TEXT = "请输入一个经营问题，我会直接返回分析结论；如果你切到“报告”，我会生成可复用的经营摘要。";
+
+function createWelcomeMessage(): Message {
+  return {
+    id: 1,
+    sender: "assistant",
+    kind: "text",
+    text: WELCOME_MESSAGE_TEXT
+  };
+}
+
+function getPreviousMonthScope(now = new Date()) {
+  const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const year = previousMonth.getFullYear();
+  const month = String(previousMonth.getMonth() + 1).padStart(2, "0");
+  return `${year}${month}`;
+}
+
+function isRole(value: string | null): value is Role {
+  return value === "GROUP_ADMIN" || value === "AREA_MANAGER" || value === "HOTEL_MANAGER";
+}
+
+function getInitialRole(): Role {
+  if (typeof window === "undefined") return DEFAULT_ROLE;
+  const roleFromUrl = new URLSearchParams(window.location.search).get("role");
+  if (isRole(roleFromUrl)) {
+    window.localStorage.setItem(ROLE_STORAGE_KEY, roleFromUrl);
+    return roleFromUrl;
+  }
+  const storedRole = window.localStorage.getItem(ROLE_STORAGE_KEY);
+  return isRole(storedRole) ? storedRole : DEFAULT_ROLE;
+}
+
+function createConversation(seed?: Partial<Conversation>): Conversation {
+  const now = Date.now();
+  return {
+    id: seed?.id || `conversation-${now}-${Math.random().toString(16).slice(2)}`,
+    title: seed?.title || "新会话",
+    createdAt: seed?.createdAt || now,
+    updatedAt: seed?.updatedAt || now,
+    messages: seed?.messages?.length ? seed.messages : [createWelcomeMessage()],
+    context: { ...EMPTY_CONTEXT, ...(seed?.context || {}) }
+  };
+}
+
+function getConversationTitleFromQuestion(value: string) {
+  const title = value.replace(/\s+/g, " ").trim();
+  if (!title) return "新会话";
+  return title.length > 22 ? `${title.slice(0, 22)}...` : title;
+}
+
+function getConversationMeta(conversation: Conversation) {
+  const context = conversation.context;
+  const pieces = [
+    context.lastScopeLabel || context.lastHotel || context.lastArea,
+    context.lastTimeScope ? formatTimeScopeLabel(context.lastTimeScope) : null,
+    context.lastMetric
+  ].filter(Boolean);
+  return pieces.length ? pieces.join(" · ") : "等待经营问题";
+}
+
+function getContextSnapshotItems(context: ConversationContext) {
+  return [
+    context.lastScopeLabel || context.lastHotel || context.lastArea ? `范围：${context.lastScopeLabel || context.lastHotel || context.lastArea}` : null,
+    context.lastTimeScope ? `时间：${formatTimeScopeLabel(context.lastTimeScope)}` : null,
+    context.lastMetric ? `指标：${context.lastMetric}` : null,
+    context.lastCompareMode ? `口径：${getAnalysisModeLabel(context.lastCompareMode)}` : null
+  ].filter(Boolean) as string[];
+}
+
+function restoreConversations(): Conversation[] {
+  if (typeof window === "undefined") return [createConversation()];
+  try {
+    const raw = window.localStorage.getItem(CONVERSATION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!Array.isArray(parsed) || !parsed.length) return [createConversation()];
+    return parsed
+      .filter((item) => item && typeof item === "object")
+      .map((item) =>
+        createConversation({
+          id: String(item.id || ""),
+          title: String(item.title || "新会话"),
+          createdAt: Number(item.createdAt) || Date.now(),
+          updatedAt: Number(item.updatedAt) || Date.now(),
+          messages: Array.isArray(item.messages) && item.messages.length ? item.messages : [createWelcomeMessage()],
+          context: item.context || EMPTY_CONTEXT
+        })
+      )
+      .slice(0, 20);
+  } catch {
+    return [createConversation()];
+  }
+}
 
 function formatJson(value: unknown) {
   if (value == null) return "暂无数据";
@@ -167,12 +286,13 @@ function getExecutiveSummaryLine(result: any) {
 
 function extractContext(result: any, question: string): ConversationContext {
   const summary = String(result?.summary || "");
+  const parsed = result?.parsed_intent || result?.source_query?.parsed_intent || {};
+  const queryPlan = parsed?.query_plan || result?.query_plan || {};
   const firstPoint = Array.isArray(result?.data_points) && result.data_points.length ? result.data_points[0] : null;
   const firstSection = Array.isArray(result?.report_sections) && result.report_sections.length ? result.report_sections[0] : null;
   const metric =
     result?.metric_definition?.name_cn ||
-    result?.parsed_intent?.metric_code ||
-    result?.source_query?.parsed_intent?.metric_code ||
+    parsed?.metric_code ||
     null;
   const hotel =
     firstPoint?.hotel_name ||
@@ -188,25 +308,15 @@ function extractContext(result: any, question: string): ConversationContext {
     lastMetric: metric,
     lastHotel: hotel,
     lastArea: area,
+    lastTimeScope: parsed?.time_scope || null,
+    lastScopeLabel: queryPlan?.query_object_label || hotel || area || null,
+    lastCompareMode: queryPlan?.analysis_mode || parsed?.compare_mode || null,
     lastSummary: String(firstSection?.content || summary || "")
   };
 }
 
-function getFollowUpSuggestions(context: ConversationContext) {
-  const dynamic: string[] = [];
-  if (context.lastHotel) {
-    dynamic.push(`只看${context.lastHotel}`);
-    dynamic.push(`继续分析${context.lastHotel}原因`);
-  }
-  if (context.lastArea) {
-    dynamic.push(`只看${context.lastArea}`);
-    dynamic.push(`生成${context.lastArea}经营摘要`);
-  }
-  if (context.lastMetric) {
-    dynamic.push(`看${context.lastMetric}同比变化`);
-    dynamic.push(`给出${context.lastMetric}管理建议`);
-  }
-  return [...dynamic, ...BASE_FOLLOW_UP_SUGGESTIONS].filter((item, index, arr) => arr.indexOf(item) === index).slice(0, 6);
+function getFollowUpSuggestions(_context: ConversationContext) {
+  return BASE_FOLLOW_UP_SUGGESTIONS;
 }
 
 function getClarificationSuggestions(result: any) {
@@ -538,6 +648,26 @@ function resolveActionMode(input: string, selectedMode: ActionMode) {
   return selectedMode;
 }
 
+function inferAnalysisFocus(input: string, mode: ActionMode): AnalysisFocus {
+  const text = input.trim();
+  if (mode === "report" || /生成.*(摘要|报告)|输出.*(摘要|报告)|换成.*摘要|改成.*摘要/.test(text)) {
+    return "management_report";
+  }
+  if (/原因|为什么|归因|继续展开/.test(text)) {
+    return "driver_analysis";
+  }
+  if (/同比/.test(text)) {
+    return "yoy_change";
+  }
+  if (/收入结构|收入质量|客房收入|餐饮|宴会/.test(text)) {
+    return "income_structure";
+  }
+  if (/利润.*成本|成本.*利润|成本效率|利润质量|人工|能耗|能源|费用率/.test(text)) {
+    return "profit_cost_efficiency";
+  }
+  return null;
+}
+
 function rewriteFollowUpQuestion(input: string, context: ConversationContext) {
   const trimmed = input.trim();
   const lastQuestion = context.lastQuestion;
@@ -677,12 +807,14 @@ function ResultCard({
   result,
   onFollowUp,
   disabled = false,
-  suggestions = BASE_FOLLOW_UP_SUGGESTIONS
+  suggestions = BASE_FOLLOW_UP_SUGGESTIONS,
+  showTechnicalDetails = false
 }: {
   result: any;
   onFollowUp: (value: string) => void;
   disabled?: boolean;
   suggestions?: string[];
+  showTechnicalDetails?: boolean;
 }) {
   const highlights = getHighlights(result);
   const sections = getPrimarySections(result);
@@ -696,7 +828,6 @@ function ResultCard({
   const isPortfolio = String(result?.parsed_intent?.query_plan?.query_grain || "") === "portfolio";
   const portfolioMemberCount = getPortfolioMemberCount(result);
   const portfolioOutlierItems = getPortfolioOutlierItems(result);
-  const quickFilters = getQuickFilters(result);
   return (
     <div className="result-card" data-testid="result-card">
       <div className="assistant-card-head">
@@ -798,7 +929,7 @@ function ResultCard({
         </div>
       ) : null}
 
-      {hasDetailedSections(result) ? (
+      {showTechnicalDetails && hasDetailedSections(result) ? (
         <details className="details-card analysis-details-card" data-testid="details-analysis-sections">
           <summary>查看分析明细</summary>
           <div className="mobile-section-list">
@@ -812,7 +943,7 @@ function ResultCard({
         </details>
       ) : null}
 
-      {result?.trace_id || result?.parsed_intent ? (
+      {showTechnicalDetails && (result?.trace_id || result?.parsed_intent) ? (
         <details className="details-card diagnostic-card" data-testid="details-diagnostics">
           <summary>技术诊断信息</summary>
           <div className="result-meta diagnostic-meta">
@@ -825,35 +956,35 @@ function ResultCard({
         </details>
       ) : null}
 
-      {result?.report_markdown ? (
+      {showTechnicalDetails && result?.report_markdown ? (
         <details className="details-card" data-testid="details-report-markdown">
           <summary>查看报告 Markdown</summary>
           <pre className="pre">{String(result.report_markdown)}</pre>
         </details>
       ) : null}
 
-      {result?.data_points ? (
+      {showTechnicalDetails && result?.data_points ? (
         <details className="details-card" data-testid="details-data-points">
           <summary>查看结构化数据</summary>
           <pre className="pre">{formatJson(result.data_points)}</pre>
         </details>
       ) : null}
 
-      {result?.sql_plan ? (
+      {showTechnicalDetails && result?.sql_plan ? (
         <details className="details-card" data-testid="details-sql-plan">
           <summary>查看 SQL 计划</summary>
           <pre className="pre">{formatJson(result.sql_plan)}</pre>
         </details>
       ) : null}
 
-      {result?.auth_scope ? (
+      {showTechnicalDetails && result?.auth_scope ? (
         <details className="details-card" data-testid="details-auth-scope">
           <summary>查看权限范围</summary>
           <pre className="pre">{formatJson(result.auth_scope)}</pre>
         </details>
       ) : null}
 
-      {Array.isArray(result?.warnings) && result.warnings.length ? (
+      {showTechnicalDetails && Array.isArray(result?.warnings) && result.warnings.length ? (
         <details className="details-card" data-testid="details-warnings">
           <summary>查看系统提示</summary>
           <pre className="pre">{formatJson(result.warnings)}</pre>
@@ -863,28 +994,6 @@ function ResultCard({
       <details className="details-card follow-up-details-card" data-testid="follow-up-actions">
         <summary>你可以继续问</summary>
         <div className="result-block">
-          {quickFilters.length ? (
-            <div className="quick-filter-groups inline-followup-filters" data-testid="quick-filters">
-              {quickFilters.map((group) => (
-                <div className="quick-filter-group" key={group.label}>
-                  <div className="quick-filter-label">{group.label}</div>
-                  <div className="chip-list">
-                    {group.items.map((item) => (
-                      <button
-                        type="button"
-                        className="chip chip-secondary"
-                        key={`${group.label}-${item.label}`}
-                        disabled={disabled}
-                        onClick={() => onFollowUp(item.prompt)}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
           <div className="chip-list">
             {finalSuggestions.map((item, index) => (
               <button
@@ -907,36 +1016,58 @@ function ResultCard({
 
 export default function App() {
   const [question, setQuestion] = useState(DEFAULT_QUESTION);
-  const [timeScope, setTimeScope] = useState(DEFAULT_TIME_SCOPE);
-  const [role, setRole] = useState<Role>(DEFAULT_ROLE);
+  const [timeScope, setTimeScope] = useState(() => getPreviousMonthScope());
+  const [role, setRole] = useState<Role>(() => getInitialRole());
   const [actionMode, setActionMode] = useState<ActionMode>("query");
   const [externalBenchmark, setExternalBenchmark] = useState(false);
   const [status, setStatus] = useState<QueryStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [conversationContext, setConversationContext] = useState<ConversationContext>({
-    lastQuestion: null,
-    lastMetric: null,
-    lastHotel: null,
-    lastArea: null,
-    lastSummary: null
-  });
   const [contextHint, setContextHint] = useState<string | null>(null);
   const [activeFrame, setActiveFrame] = useState<QuestionFrame | null>(null);
   const [loadingStep, setLoadingStep] = useState(0);
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 1,
-      sender: "assistant",
-      kind: "text",
-      text: "请输入一个经营问题，我会直接返回分析结论；如果你切到“报告”，我会生成可复用的经营摘要。"
-    }
-  ]);
+  const [conversations, setConversations] = useState<Conversation[]>(() => restoreConversations());
+  const [activeConversationId, setActiveConversationId] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) || "";
+  });
   const requestIdRef = useRef(1);
 
   const isLoading = status === "loading";
+  const showTechnicalDetails = role !== "GROUP_ADMIN";
   const quickQuestions = systemSettings?.quick_questions?.length ? systemSettings.quick_questions : FALLBACK_QUICK_QUESTIONS;
+  const sortedConversations = useMemo(
+    () => [...conversations].sort((a, b) => b.updatedAt - a.updatedAt),
+    [conversations]
+  );
+  const activeConversation = useMemo(() => {
+    return conversations.find((item) => item.id === activeConversationId) || sortedConversations[0] || createConversation();
+  }, [activeConversationId, conversations, sortedConversations]);
+  const messages = activeConversation.messages;
+  const conversationContext = activeConversation.context || EMPTY_CONTEXT;
+  const contextSnapshotItems = getContextSnapshotItems(conversationContext);
+
+  useEffect(() => {
+    if (conversations.some((item) => item.id === activeConversationId)) return;
+    const fallbackId = sortedConversations[0]?.id;
+    if (fallbackId) setActiveConversationId(fallbackId);
+  }, [activeConversationId, conversations, sortedConversations]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(conversations.slice(0, 20)));
+  }, [conversations]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !activeConversationId) return;
+    window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId);
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(ROLE_STORAGE_KEY, role);
+  }, [role]);
 
   useEffect(() => {
     let active = true;
@@ -971,13 +1102,41 @@ export default function App() {
     return actionMode === "report" ? "例如：生成华南区本月经营摘要" : "例如：为什么某酒店经营利润低于预算？";
   }, [actionMode, contextHint]);
 
+  function updateConversationById(conversationId: string, updater: (conversation: Conversation) => Conversation) {
+    setConversations((current) =>
+      current.map((conversation) => (conversation.id === conversationId ? updater(conversation) : conversation))
+    );
+  }
+
+  function createFreshConversation() {
+    const conversation = createConversation();
+    setConversations((current) => [conversation, ...current].slice(0, 20));
+    setActiveConversationId(conversation.id);
+    setQuestion("");
+    setContextHint(null);
+    setError(null);
+    setActiveFrame(null);
+    setStatus("idle");
+  }
+
+  function selectConversation(conversationId: string) {
+    setActiveConversationId(conversationId);
+    setQuestion("");
+    setContextHint(null);
+    setError(null);
+    setActiveFrame(null);
+    if (!isLoading) setStatus("idle");
+  }
+
   async function run(nextQuestion?: string, options?: { useContextRewrite?: boolean }) {
     const rawQuestion = (nextQuestion ?? question).trim();
     if (!rawQuestion) return;
 
-    const rewritten = options?.useContextRewrite === false ? { rewritten: rawQuestion, usedContext: false } : rewriteFollowUpQuestion(rawQuestion, conversationContext);
+    const currentConversationId = activeConversation.id;
+    const currentContext = conversationContext;
+    const rewritten = options?.useContextRewrite === false ? { rewritten: rawQuestion, usedContext: false } : rewriteFollowUpQuestion(rawQuestion, currentContext);
     const finalQuestion = rewritten.rewritten;
-    const effectiveMode = resolveActionMode(finalQuestion, actionMode);
+    const effectiveMode = resolveActionMode(rawQuestion, actionMode);
 
     const currentRequestId = ++requestIdRef.current;
     const userMessage: Message = {
@@ -988,7 +1147,12 @@ export default function App() {
       originalQuestion: finalQuestion
     };
 
-    setMessages((current) => [...current, userMessage]);
+    updateConversationById(currentConversationId, (conversation) => ({
+      ...conversation,
+      title: conversation.title === "新会话" ? getConversationTitleFromQuestion(rawQuestion) : conversation.title,
+      updatedAt: Date.now(),
+      messages: [...conversation.messages, userMessage]
+    }));
     setStatus("loading");
     setLoadingStep(0);
     setActiveFrame(inferQuestionFrame(finalQuestion, timeScope, effectiveMode, rewritten.usedContext));
@@ -999,44 +1163,52 @@ export default function App() {
     try {
       const payload = {
         question: finalQuestion,
-        context: { time_scope: timeScope, language: "zh-CN", external_benchmark: externalBenchmark },
+        context: { time_scope: timeScope, language: "zh-CN", external_benchmark: externalBenchmark, analysis_focus: inferAnalysisFocus(rawQuestion, effectiveMode) },
         auth: { user_id: "u001", role }
       };
       const result = effectiveMode === "report" ? await submitReport(payload) : await submitQuery(payload);
 
       if (currentRequestId !== requestIdRef.current) return;
 
-      setMessages((current) => [
-        ...current,
-        {
+      updateConversationById(currentConversationId, (conversation) => ({
+        ...conversation,
+        updatedAt: Date.now(),
+        context: extractContext(result, finalQuestion),
+        messages: [
+          ...conversation.messages,
+          {
           id: currentRequestId * 2 + 1,
           sender: "assistant",
           kind: "result",
           text: getResultSummary(result),
           payload: result,
           originalQuestion: finalQuestion
-        }
-      ]);
+          }
+        ]
+      }));
       setStatus("success");
       setQuestion("");
       setActiveFrame(null);
-      setConversationContext(extractContext(result, finalQuestion));
     } catch (err) {
       if (currentRequestId !== requestIdRef.current) return;
 
       const message = err instanceof Error ? err.message : "请求失败，请稍后重试。";
       setError(message);
       setActiveFrame(null);
-      setMessages((current) => [
-        ...current,
-        {
-          id: currentRequestId * 2 + 1,
-          sender: "assistant",
-          kind: "text",
-          text: `这次没有成功返回结果：${message}`,
-          originalQuestion: finalQuestion
-        }
-      ]);
+      updateConversationById(currentConversationId, (conversation) => ({
+        ...conversation,
+        updatedAt: Date.now(),
+        messages: [
+          ...conversation.messages,
+          {
+            id: currentRequestId * 2 + 1,
+            sender: "assistant",
+            kind: "text",
+            text: `这次没有成功返回结果：${message}`,
+            originalQuestion: finalQuestion
+          }
+        ]
+      }));
       setStatus("error");
     }
   }
@@ -1064,6 +1236,40 @@ export default function App() {
           <div className={`status-badge status-${status}`}>{status === "idle" ? "待输入" : status === "loading" ? "处理中" : status === "success" ? "已返回" : "有异常"}</div>
         </header>
 
+        <section className="conversation-panel panel" data-testid="conversation-panel">
+          <div className="conversation-head">
+            <div>
+              <div className="panel-title">会话历史</div>
+              <div className="section-desc">不同主题彼此隔离，追问只承接当前会话。</div>
+            </div>
+            <button type="button" className="new-conversation-btn" onClick={createFreshConversation} data-testid="new-conversation">
+              新会话
+            </button>
+          </div>
+          <div className="conversation-list" data-testid="conversation-list" aria-label="会话历史">
+            {sortedConversations.map((conversation) => (
+              <button
+                type="button"
+                key={conversation.id}
+                className={`conversation-item ${conversation.id === activeConversation.id ? "active" : ""}`}
+                onClick={() => selectConversation(conversation.id)}
+                data-testid="conversation-item"
+              >
+                <span className="conversation-title">{conversation.title}</span>
+                <span className="conversation-meta">{getConversationMeta(conversation)}</span>
+              </button>
+            ))}
+          </div>
+          {contextSnapshotItems.length ? (
+            <div className="context-snapshot" data-testid="context-snapshot">
+              <span className="context-snapshot-label">当前承接</span>
+              {contextSnapshotItems.map((item) => (
+                <span className="context-snapshot-item" key={item}>{item}</span>
+              ))}
+            </div>
+          ) : null}
+        </section>
+
         <div className="quick-strip">
           <QuickQuestions onSelect={(q) => void run(q, { useContextRewrite: false })} activeQuestion={question} disabled={isLoading} questions={quickQuestions} />
         </div>
@@ -1078,6 +1284,7 @@ export default function App() {
                     onFollowUp={handleFollowUp}
                     disabled={isLoading}
                     suggestions={getFollowUpSuggestions(conversationContext)}
+                    showTechnicalDetails={showTechnicalDetails}
                   />
                 ) : (
                   <div className="message-text">
@@ -1102,7 +1309,7 @@ export default function App() {
 
         <footer className="composer-shell">
           <details className="advanced-panel" data-testid="advanced-panel">
-            <summary>高级设置与调优观察</summary>
+            <summary>高级设置</summary>
             <div className="advanced-grid">
               <label className="field">
                 <span className="field-label">输出模式</span>
@@ -1120,7 +1327,8 @@ export default function App() {
                 <input className="input" value={timeScope} onChange={(e) => setTimeScope(e.target.value)} data-testid="time-scope-input" />
               </label>
 
-              <label className="field">
+              {showTechnicalDetails ? (
+                <label className="field">
                 <span className="field-label">访问角色</span>
                 <select className="input" value={role} onChange={(e) => setRole(e.target.value as Role)} data-testid="role-select">
                   {ROLE_OPTIONS.map((option) => (
@@ -1130,6 +1338,7 @@ export default function App() {
                   ))}
                 </select>
               </label>
+              ) : null}
 
               <label className="field">
                 <span className="field-label">外部行业对标</span>
@@ -1144,6 +1353,7 @@ export default function App() {
               </label>
             </div>
 
+            {showTechnicalDetails ? (
             <div className="system-config-panel" data-testid="system-config-panel">
               <div className="system-config-card">
                 <div className="result-block-title">模型配置</div>
@@ -1176,6 +1386,7 @@ export default function App() {
 
               {settingsError ? <div className="composer-error">系统设置读取失败：{settingsError}</div> : null}
             </div>
+            ) : null}
           </details>
 
           <div className="composer">

@@ -68,6 +68,7 @@ _HOTEL_GROUP_PATTERN = re.compile(
 )
 _PORTFOLIO_TERMS = ("总体", "整体", "总体经营", "整体经营", "汇总", "汇总情况")
 _ALL_SCOPE_TERMS = ("所有", "全部", "全部的", "整个", "全量")
+_COMPANY_ROOT_TERMS = ("富力", "富力集团", "公司", "集团", "本公司", "全公司")
 
 LLM_BASE_URL = os.getenv("QWEN_API_BASE_URL", "").strip()
 LLM_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
@@ -398,6 +399,10 @@ def iter_keyword_map(section: object) -> list[tuple[str, object]]:
 
 
 def extract_metric_code(cfg: dict, question_norm: str) -> tuple[str, str | None]:
+    if re.search(r"(多少|几|总共|合计).{0,8}家?酒店.{0,8}(在营|运营|营业|开业)", question_norm) or re.search(
+        r"(在营|运营|营业|开业).{0,8}酒店.{0,8}(多少|几|总共|合计)", question_norm
+    ):
+        return "OPERATING_HOTEL_COUNT", "在营酒店数问法"
     synonyms = iter_keyword_map(cfg.get("synonyms", {}))
     synonyms.sort(key=lambda item: len(normalize_text(item[0])), reverse=True)
     for keyword, value in synonyms:
@@ -547,6 +552,22 @@ def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str,
     token_norm = normalize_text(token)
     if not token_norm:
         return None
+    if token_norm in {normalize_text(term) for term in _COMPANY_ROOT_TERMS}:
+        members: list[str] = []
+        for node in load_scope_graph():
+            hotel_name = str(node.get("hotel_name") or "").strip()
+            if hotel_name and hotel_name not in members:
+                members.append(hotel_name)
+        if not members:
+            members = list(load_entity_catalog().get("hotel", []))
+        return {
+            "label": "公司全部酒店",
+            "group_token": token,
+            "member_hotels": members,
+            "member_count": len(members),
+            "resolution_basis": "company_root_all_hotels",
+            "use_group_token_as_filter": False,
+        }
     hotels = load_entity_catalog().get("hotel", [])
     members: list[str] = []
     for hotel in hotels:
@@ -561,6 +582,7 @@ def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str,
         "member_hotels": members,
         "member_count": len(members),
         "resolution_basis": "hotel_name_contains_token",
+        "use_group_token_as_filter": True,
     }
 
 
@@ -758,13 +780,52 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         themes = [metric_name, "internal_benchmark"]
         execution_order = ["resolve_scope", "query_metric", "compose_snapshot"]
 
+    fast_steps = {"resolve_scope", "count_entities", "query_metric", "query_ranked_rows", "aggregate_metrics", "compose_stat", "compose_snapshot", "compose_ranking"}
+    async_steps = {"peer_benchmark", "identify_outliers", "identify_drivers", "compose_explanation", "compose_report", "compose_overview"}
+    filters = {
+        "areas": areas,
+        "hotels": hotels,
+        "manage_corps": manage_corps,
+        "brand_children": brand_children,
+        "builders": list(result.get("requested_builders", [])),
+        "brand_levels": list(result.get("requested_brand_levels", [])),
+        "city_levels": list(result.get("requested_city_levels", [])),
+        "departments": list(result.get("requested_departments", [])),
+        "accounts": list(result.get("requested_accounts", [])),
+    }
+    query_steps = [
+        {
+            "step": step,
+            "must_be_fast": step in fast_steps,
+            "can_async": step in async_steps,
+        }
+        for step in execution_order
+    ]
+    evidence_needed = [
+        "pnl_fact" if theme in {"income_quality", "profit_quality", "cost_efficiency", "driver_breakdown", "pnl_drilldown"} else
+        "hotel_dimension" if theme in {"scope_inventory", "internal_benchmark"} else
+        "metric_snapshot"
+        for theme in themes
+    ]
+
     return {
+        "planner_contract_version": "1.0",
+        "intent": intent,
+        "time_scope": result.get("time_scope"),
+        "period_type": result.get("period_type"),
+        "metrics": [{"code": metric_code, "name": metric_name}],
+        "comparison_mode": result.get("compare_mode"),
+        "filters": filters,
         "query_object_type": object_type,
         "query_object_label": object_label,
         "query_grain": query_grain,
         "analysis_mode": analysis_mode,
         "themes": themes,
         "execution_order": execution_order,
+        "query_steps": query_steps,
+        "evidence_needed": list(dict.fromkeys(evidence_needed)),
+        "fast_path": [item["step"] for item in query_steps if item["must_be_fast"]],
+        "async_path": [item["step"] for item in query_steps if item["can_async"]],
         "resolved_hotel_count": (
             len(hotel_group.get("member_hotels", []))
             if hotel_group
@@ -920,6 +981,7 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
     if matched_skill and skill_variance in {"below", "above", "all"} and variance_direction == "all":
         variance_direction = skill_variance
     time_scope = normalize_time_scope(payload.time_scope, defaults, warnings, payload.question)
+    time_scope_explicit = bool(_YEAR_MONTH_IN_QUESTION_RE.search(payload.question) or _MONTH_IN_QUESTION_RE.search(payload.question))
     period_type = str(skill_defaults.get("period_type") or defaults.get("period_type", "MTD")).strip() or "MTD"
     scope = extract_scope(payload.question)
     if metric_code == "OPERATING_HOTEL_COUNT":
@@ -959,6 +1021,7 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
         "compare_mode": compare_mode,
         "variance_direction": variance_direction,
         "time_scope": time_scope,
+        "time_scope_explicit": time_scope_explicit,
         "period_type": period_type,
         "requested_areas": scope["requested_areas"],
         "requested_hotels": scope["requested_hotels"],

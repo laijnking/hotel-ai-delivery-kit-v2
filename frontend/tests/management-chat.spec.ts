@@ -9,7 +9,17 @@ async function waitForAssistantResult(page: Page, expectedCount?: number) {
   await expect(page.getByTestId("result-summary").last()).not.toContainText("暂无数据");
 }
 
+function previousMonthScope() {
+  const now = new Date();
+  const previous = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  return `${previous.getFullYear()}${String(previous.getMonth() + 1).padStart(2, "0")}`;
+}
+
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.clear();
+  });
+
   await page.route("**/api/v1/system/settings", async (route) => {
     await route.fulfill({
       status: 200,
@@ -39,12 +49,20 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/ai/**", async (route) => {
     const isReport = route.request().url().includes("/ai/report");
     const payload = route.request().postDataJSON?.() || {};
+    const focus = payload.context?.analysis_focus;
+    const focusedSummary =
+      focus === "driver_analysis" ? "已切换到原因展开：mock酒店 当前波动主要来自收入端和成本端。" :
+      focus === "management_report" ? "已生成经营摘要：mock酒店 已整理收入质量、客房效率、利润质量和成本效率。" :
+      focus === "yoy_change" ? "已切换到同比变化观察：mock酒店 同比口径已返回。" :
+      focus === "income_structure" ? "已切换到收入结构拆解：mock酒店 总收入、客房收入、餐饮/宴会收入结构已返回。" :
+      focus === "profit_cost_efficiency" ? "已切换到利润与成本效率拆解：mock酒店 利润质量和成本效率已返回。" :
+      null;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         trace_id: "trace_frontend_mock",
-        summary: isReport ? "已生成 mock酒店 经营摘要。" : "已完成 mock酒店 的经营对比分析，返回 1 家酒店。",
+        summary: focusedSummary || (isReport ? "已生成 mock酒店 经营摘要。" : "已完成 mock酒店 的经营对比分析，返回 1 家酒店。"),
         parsed_intent: {
           intent: isReport ? "report" : "query",
           metric_code: "TOTAL_INCOME",
@@ -96,8 +114,12 @@ test.beforeEach(async ({ page }) => {
         sql_plan: { safe: true, rewritten_sql: "SELECT 1" },
         auth_scope: { allowed_areas: ["ALL"], allowed_hotels: ["ALL"] },
         explanation: {
-          risks: ["mock酒店 收入高于预算，正数代表实际高于对比值。"],
-          suggestions: ["继续下钻收入结构和客户来源。"],
+          risks: focus === "income_structure"
+            ? ["收入结构：总收入、客房收入、餐饮/宴会收入结构已进入本轮观察。"]
+            : focus === "profit_cost_efficiency"
+              ? ["利润与成本：经营利润、人工、能耗、餐饮成本和费用率已进入本轮观察。"]
+              : ["mock酒店 收入高于预算，正数代表实际高于对比值。"],
+          suggestions: focus ? [`当前追问焦点：${focus}`] : ["继续下钻收入结构和客户来源。"],
           report_sections: [
             { title: "结论", content: "已完成 mock酒店 分析。" },
             { title: "风险", content: "mock酒店 暂无重大负向风险。" },
@@ -122,21 +144,28 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("发送按钮会返回三段式经营结果", async ({ page }) => {
+  const submittedPayloads: any[] = [];
+  page.on("request", (request) => {
+    if (!request.url().includes("/api/v1/ai/query")) return;
+    submittedPayloads.push(request.postDataJSON?.());
+  });
+
   await page.getByTestId("composer-input").fill("本月哪些酒店经营利润未达预算？");
   await page.getByTestId("composer-send").click();
 
   await waitForAssistantResult(page, 1);
+  expect(submittedPayloads.at(-1)?.auth?.role).toBe("GROUP_ADMIN");
+  expect(submittedPayloads.at(-1)?.context?.time_scope).toBe(previousMonthScope());
   await expect(page.getByTestId("result-summary").last()).toContainText(/返回|完成|酒店/);
   await expect(page.getByTestId("recognized-scope").last()).toContainText("mock酒店");
   await expect(page.getByTestId("recognized-scope").last()).toContainText("2026年3月");
   await expect(page.getByTestId("recognized-scope").last()).toContainText("单点快照");
   await expect(page.getByTestId("executive-overview").last()).toContainText("管理层速览");
   await expect(page.getByTestId("internal-benchmark-card").last()).toContainText("同区域同品牌");
-  await expect(page.getByTestId("details-analysis-sections").last()).toBeVisible();
-  await page.locator("[data-testid='details-analysis-sections'] summary").last().click();
-  await expect(page.getByTestId("section-结论").last()).toContainText("已完成");
-  await expect(page.getByTestId("section-风险").last()).toContainText(/酒店|风险|异常|正负/);
-  await expect(page.getByTestId("section-建议").last()).toContainText("下钻");
+  await expect(page.getByTestId("advanced-panel")).toBeVisible();
+  await expect(page.getByTestId("details-analysis-sections")).toHaveCount(0);
+  await expect(page.getByTestId("details-diagnostics")).toHaveCount(0);
+  await expect(page.getByTestId("details-sql-plan")).toHaveCount(0);
 });
 
 test("发送后会先展示识别口径和阶段进度", async ({ page }) => {
@@ -177,7 +206,7 @@ test("快捷提问按钮逐个点击都能返回结果", async ({ page }) => {
     await expect(page.getByTestId("result-summary").last()).toContainText(/已完成|返回|未查询到|生成/);
   }
 
-  await expect(page.getByTestId("details-report-markdown").last()).toBeVisible();
+  await expect(page.getByTestId("details-report-markdown")).toHaveCount(0);
 });
 
 test("继续追问按钮会带着上下文返回新结果", async ({ page }) => {
@@ -190,7 +219,80 @@ test("继续追问按钮会带着上下文返回新结果", async ({ page }) => 
 
   await expect(page.getByText("已按上下文理解为：").last()).toBeVisible();
   await waitForAssistantResult(page, 2);
-  await expect(page.getByTestId("result-summary").last()).toContainText(/已完成|返回|分析/);
+  await expect(page.getByTestId("result-summary").last()).toContainText(/完成|返回|分析|原因展开/);
+});
+
+test("不同连续追问会带不同分析焦点并返回差异化结果", async ({ page }) => {
+  const submittedPayloads: any[] = [];
+  page.on("request", (request) => {
+    if (!request.url().includes("/api/v1/ai/")) return;
+    submittedPayloads.push(request.postDataJSON?.());
+  });
+
+  await page.getByTestId("composer-input").fill("广州丽思卡尔顿酒店3月的经营情况怎么样？");
+  await page.getByTestId("composer-send").click();
+  await waitForAssistantResult(page, 1);
+
+  const cases = [
+    { label: "继续展开原因", focus: "driver_analysis", summary: "原因展开" },
+    { label: "换成经营摘要", focus: "management_report", summary: "经营摘要" },
+    { label: "看同比变化", focus: "yoy_change", summary: "同比变化" },
+    { label: "分析收入结构", focus: "income_structure", summary: "收入结构" },
+    { label: "看利润和成本效率", focus: "profit_cost_efficiency", summary: "利润与成本效率" },
+  ];
+
+  for (const item of cases) {
+    await page.locator("[data-testid='follow-up-actions'] summary").last().click();
+    await page.getByRole("button", { name: item.label }).last().click();
+    await waitForAssistantResult(page);
+    expect(submittedPayloads.at(-1)?.context?.analysis_focus).toBe(item.focus);
+    await expect(page.getByTestId("result-summary").last()).toContainText(item.summary);
+  }
+});
+
+test("会话历史支持新建切换，并恢复各自消息和上下文", async ({ page }) => {
+  await expect(page.getByTestId("conversation-panel")).toBeVisible();
+  await expect(page.getByTestId("conversation-item")).toHaveCount(1);
+
+  await page.getByTestId("composer-input").fill("广州丽思卡尔顿酒店3月的收入情况怎么样？");
+  await page.getByTestId("composer-send").click();
+  await waitForAssistantResult(page, 1);
+  await expect(page.getByTestId("context-snapshot")).toContainText("mock酒店");
+  await expect(page.getByTestId("context-snapshot")).toContainText("2026年3月");
+
+  await page.getByTestId("new-conversation").click();
+  await expect(page.getByTestId("conversation-item")).toHaveCount(2);
+  await expect(page.getByTestId("result-card")).toHaveCount(0);
+  await expect(page.getByText("请输入一个经营问题")).toBeVisible();
+
+  await page.getByTestId("composer-input").fill("本月总收入同比如何？");
+  await page.getByTestId("composer-send").click();
+  await waitForAssistantResult(page, 1);
+
+  await page.getByTestId("conversation-list").getByRole("button", { name: /广州丽思卡尔顿酒店3月的收入情况怎么样/ }).click();
+  await expect(page.getByTestId("result-summary")).toContainText(/已完成|返回/);
+  await expect(page.getByTestId("context-snapshot")).toContainText("mock酒店");
+});
+
+test("新会话不会继承旧会话的连续追问上下文", async ({ page }) => {
+  const submittedQuestions: string[] = [];
+  page.on("request", (request) => {
+    if (!request.url().includes("/api/v1/ai/query")) return;
+    const payload = request.postDataJSON?.();
+    submittedQuestions.push(String(payload?.question || ""));
+  });
+
+  await page.getByTestId("composer-input").fill("本月哪些酒店经营利润未达预算？");
+  await page.getByTestId("composer-send").click();
+  await waitForAssistantResult(page, 1);
+
+  await page.getByTestId("new-conversation").click();
+  await page.getByTestId("composer-input").fill("继续展开原因");
+  await page.getByTestId("composer-send").click();
+  await waitForAssistantResult(page, 1);
+
+  expect(submittedQuestions.at(-1)).toBe("继续展开原因");
+  await expect(page.getByText("已按上下文理解为：")).toHaveCount(0);
 });
 
 test("快速筛选会根据问题联想区域酒店月份品牌口径，并能直接触发下一轮追问", async ({ page }) => {
@@ -255,19 +357,14 @@ test("快速筛选会根据问题联想区域酒店月份品牌口径，并能�
 
   await waitForAssistantResult(page, 1);
   await page.locator("[data-testid='follow-up-actions'] summary").last().click();
-  await expect(page.getByTestId("quick-filters").last()).toContainText("区域");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("酒店");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("月份");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("品牌");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("口径");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("分析方式");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("万豪");
-  await expect(page.getByTestId("quick-filters").last()).toContainText("同比变化");
-  await page.getByRole("button", { name: "广州富力丽思卡尔顿酒店及公寓" }).last().click();
+  await expect(page.getByTestId("quick-filters")).toHaveCount(0);
+  await expect(page.getByTestId("follow-up-0").last()).toHaveText("继续展开原因");
+  await expect(page.getByTestId("follow-up-1").last()).toHaveText("换成经营摘要");
+  await page.getByTestId("follow-up-2").last().click();
 
   await expect(page.getByText("已按上下文理解为：").last()).toBeVisible();
   await waitForAssistantResult(page, 2);
-  await expect(page.getByTestId("result-summary").last()).toContainText("单酒店视角");
+  await expect(page.getByTestId("result-summary").last()).toContainText(/完成|返回|分析/);
 });
 
 test("单酒店问题会优先展示月份口径归因和摘要类筛选", async ({ page }) => {
@@ -306,8 +403,9 @@ test("单酒店问题会优先展示月份口径归因和摘要类筛选", async
 
   await waitForAssistantResult(page, 1);
   await page.locator("[data-testid='follow-up-actions'] summary").last().click();
-  const labels = await page.locator("[data-testid='quick-filters'] .quick-filter-label").allTextContents();
-  expect(labels.slice(0, 4)).toEqual(["月份", "口径", "分析方式", "品牌"]);
+  await expect(page.getByTestId("quick-filters")).toHaveCount(0);
+  await expect(page.getByTestId("follow-up-0").last()).toHaveText("继续展开原因");
+  await expect(page.getByTestId("follow-up-4").last()).toHaveText("看利润和成本效率");
 });
 
 test("区域问题会优先展示下钻酒店切品牌切月份和摘要类筛选", async ({ page }) => {
@@ -349,11 +447,22 @@ test("区域问题会优先展示下钻酒店切品牌切月份和摘要类筛�
 
   await waitForAssistantResult(page, 1);
   await page.locator("[data-testid='follow-up-actions'] summary").last().click();
-  const labels = await page.locator("[data-testid='quick-filters'] .quick-filter-label").allTextContents();
-  expect(labels.slice(0, 4)).toEqual(["酒店", "品牌", "月份", "分析方式"]);
+  await expect(page.getByTestId("quick-filters")).toHaveCount(0);
+  await expect(page.getByTestId("follow-up-0").last()).toHaveText("继续展开原因");
+  await expect(page.getByTestId("follow-up-3").last()).toHaveText("分析收入结构");
 });
 
-test("高级设置展示模型配置和调优阶段", async ({ page }) => {
+test("集团管理层保留业务设置，非集团角色仍可通过角色视角看到调优配置", async ({ page }) => {
+  await expect(page.getByTestId("advanced-panel")).toBeVisible();
+  await page.locator("[data-testid='advanced-panel'] > summary").click();
+  await expect(page.getByTestId("action-mode-select")).toBeVisible();
+  await expect(page.getByTestId("time-scope-input")).toBeVisible();
+  await expect(page.getByTestId("external-benchmark-toggle")).toBeVisible();
+  await expect(page.getByTestId("role-select")).toHaveCount(0);
+  await expect(page.getByTestId("system-config-panel")).toHaveCount(0);
+
+  await page.goto("/?role=AREA_MANAGER");
+  await expect(page.getByText("酒店经营 AI 助手")).toBeVisible();
   await page.locator("[data-testid='advanced-panel'] > summary").click();
   await expect(page.getByTestId("system-config-panel")).toContainText("模型配置");
   await expect(page.getByTestId("system-config-panel")).toContainText("分阶段调优");
@@ -365,24 +474,18 @@ test("高级设置展示模型配置和调优阶段", async ({ page }) => {
 });
 
 test("报告模式和详情展开都能正常反馈内容", async ({ page }) => {
-  await page.locator("[data-testid='advanced-panel'] > summary").click();
-  await page.getByTestId("action-mode-select").selectOption("report");
-  await page.getByTestId("time-scope-input").fill("202601");
-  await page.getByTestId("role-select").selectOption("AREA_MANAGER");
-  await expect(page.getByTestId("composer-send")).toHaveText("生成报告");
-
   await page.getByTestId("composer-input").fill("生成华南区本月经营摘要");
   await page.getByTestId("composer-send").click();
 
   await waitForAssistantResult(page, 1);
-  await expect(page.getByTestId("details-analysis-sections")).toBeVisible();
-  await expect(page.getByTestId("details-report-markdown")).toBeVisible();
-  await page.locator("[data-testid='details-report-markdown'] summary").click();
-  await expect(page.locator("[data-testid='details-report-markdown'][open]")).toBeVisible();
-  await expect(page.locator("[data-testid='details-report-markdown'] pre")).toContainText("## 结论");
+  await expect(page.getByTestId("result-summary").last()).toContainText(/生成|摘要/);
+  await expect(page.getByTestId("details-analysis-sections")).toHaveCount(0);
+  await expect(page.getByTestId("details-report-markdown")).toHaveCount(0);
 });
 
-test("查询结果的详情按钮可以展开查看结构化内容", async ({ page }) => {
+test("非集团角色仍可展开查看结构化和技术详情", async ({ page }) => {
+  await page.goto("/?role=AREA_MANAGER");
+  await expect(page.getByText("酒店经营 AI 助手")).toBeVisible();
   await page.getByTestId("composer-input").fill("本月哪些酒店经营利润未达预算？");
   await page.getByTestId("composer-send").click();
 

@@ -252,7 +252,29 @@ def _build_management_summary(
     query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
     scope_label = _scope_label(parsed_intent, str(row.get("hotel_name") or "当前范围"))
     analysis_mode = str(query_plan.get("analysis_mode") or "").strip()
+    analysis_focus = str(parsed_intent.get("analysis_focus") or "").strip() if isinstance(parsed_intent, dict) else ""
     management_summary: list[str] = []
+
+    if analysis_focus == "income_structure":
+        management_summary.append(f"本次按 {scope_label} 专门拆收入结构，优先看总收入、客房收入、餐饮/宴会收入和其他收入的构成。")
+        management_summary.append(_build_income_quality_text(row))
+        return management_summary
+
+    if analysis_focus == "profit_cost_efficiency":
+        management_summary.append(f"本次按 {scope_label} 专门看利润质量和成本效率，重点观察利润是否跟随收入改善，以及人工、能耗、餐饮成本和费用率。")
+        management_summary.append(_build_profit_quality_text(row))
+        management_summary.append(_build_cost_efficiency_text(row))
+        return management_summary
+
+    if analysis_focus == "yoy_change":
+        management_summary.append(f"本次按 {scope_label} 切换到同比观察，重点区分当前变化是预算偏差还是去年同期基数变化。")
+        management_summary.append(summary)
+        return management_summary
+
+    if analysis_focus == "management_report":
+        management_summary.append(f"本次按 {scope_label} 整理经营摘要，先把收入质量、客房效率、利润质量、成本效率和内部对标放在同一张管理层视图里。")
+        management_summary.append(summary)
+        return management_summary
 
     if analysis_mode == "portfolio_overview":
         member_count = row.get("portfolio_member_count")
@@ -481,6 +503,7 @@ def _build_metric_response(
     positive_rows = [row for row in valid_rows if (row.get("diff_value") if isinstance(row.get("diff_value"), (int, float)) else row.get("diff_rate") or 0) > 0]
     first = ranked_rows[0]
     query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    analysis_focus = str(parsed_intent.get("analysis_focus") or "").strip() if isinstance(parsed_intent, dict) else ""
     diff_rate = _format_percent(first.get("diff_rate"))
     hotel_name = first.get("hotel_name", "某酒店")
     actual_value = _format_amount(first.get("actual_value"))
@@ -533,6 +556,16 @@ def _build_metric_response(
             "成本效率需要拆人工、能耗、餐饮成本、渠道费用和费用率。如果收入增长但这些成本费用增速更快，经营利润可能不会同步改善；当前结果尚未包含成本科目。",
             _build_benchmark_text(first, peer_insight, peer_benchmark, external_benchmark_requested),
         ]
+    if analysis_focus == "income_structure":
+        summary = f"已切换到收入结构拆解：{_build_income_quality_text(first)}"
+        risks = [_build_income_quality_text(first)]
+    elif analysis_focus == "profit_cost_efficiency":
+        summary = f"已切换到利润与成本效率拆解：{_build_profit_quality_text(first)} {_build_cost_efficiency_text(first)}"
+        risks = [_build_profit_quality_text(first), _build_cost_efficiency_text(first)]
+    elif analysis_focus == "yoy_change":
+        summary = f"已切换到同比变化观察：{summary}"
+    elif analysis_focus == "management_report":
+        summary = f"已整理经营摘要：{summary}"
     management_summary = _build_management_summary(
         metric_name=metric_name,
         parsed_intent=parsed_intent,

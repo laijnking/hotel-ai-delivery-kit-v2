@@ -135,8 +135,17 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertEqual(result["query_plan"]["query_object_type"], "hotel_group")
         self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
         self.assertEqual(result["query_plan"]["analysis_mode"], "portfolio_overview")
+        self.assertEqual(result["query_plan"]["planner_contract_version"], "1.0")
+        self.assertEqual(result["query_plan"]["intent"], "query")
+        self.assertEqual(result["query_plan"]["time_scope"], "202601")
+        self.assertEqual(result["query_plan"]["metrics"][0]["code"], "OPERATING_PROFIT")
+        self.assertIn("resolve_scope", result["query_plan"]["fast_path"])
+        self.assertIn("peer_benchmark", result["query_plan"]["async_path"])
+        self.assertIn("pnl_fact", result["query_plan"]["evidence_needed"])
         self.assertGreaterEqual(result["query_plan"]["resolved_hotel_count"], 2)
         self.assertEqual(result["resolved_entities"]["hotel_group"]["group_token"], "富力")
+        self.assertEqual(result["resolved_entities"]["hotel_group"]["resolution_basis"], "company_root_all_hotels")
+        self.assertFalse(result["resolved_entities"]["hotel_group"]["use_group_token_as_filter"])
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_recognizes_operating_hotel_count_metric(self):
@@ -145,6 +154,17 @@ class ServiceSmokeTests(unittest.TestCase):
                 semantic_main.Req(question="目前在运营的酒店有多少家？", time_scope="202601")
             )
         self.assertEqual(result["metric_code"], "OPERATING_HOTEL_COUNT")
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_recognizes_monthly_operating_hotel_count_question(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(question="3月份总共有多少家酒店在运营", time_scope="202601")
+            )
+        self.assertEqual(result["metric_code"], "OPERATING_HOTEL_COUNT")
+        self.assertEqual(result["time_scope"], "202603")
+        self.assertTrue(result["time_scope_explicit"])
+        self.assertEqual(result["query_plan"]["analysis_mode"], "scope_stat_snapshot")
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_builds_scope_collection_for_area_portfolio(self):
@@ -176,6 +196,8 @@ class ServiceSmokeTests(unittest.TestCase):
     @unittest.skipIf(metric_main is None, f"metric-service deps missing: {metric_error}")
     def test_metric_alias_lookup_for_operating_hotel_count(self):
         result = metric_main.get_metric("在营酒店数")
+        self.assertEqual(result["metric_code"], "OPERATING_HOTEL_COUNT")
+        result = metric_main.get_metric("总共有多少家酒店在运营")
         self.assertEqual(result["metric_code"], "OPERATING_HOTEL_COUNT")
 
     @unittest.skipIf(guardrail_main is None, f"guardrail-service deps missing: {guardrail_error}")
@@ -364,6 +386,40 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertEqual(result, ["广州富力丽思卡尔顿酒店", "成都富力丽思卡尔顿酒店"])
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_effective_requested_hotels_adds_hotel_group_token_fallback(self):
+        result = ai_query_main.effective_requested_hotels(
+            {
+                "query_plan": {"query_object_type": "hotel_group"},
+                "resolved_entities": {
+                    "hotel_group": {
+                        "group_token": "富力",
+                        "member_hotels": ["广州富力丽思卡尔顿酒店", "香水湾富力万豪度假酒店"],
+                    }
+                },
+                "requested_hotels": [],
+            }
+        )
+        self.assertEqual(result, ["广州富力丽思卡尔顿酒店", "香水湾富力万豪度假酒店", "富力"])
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_effective_requested_hotels_does_not_filter_company_all_hotels_by_fuli_name(self):
+        result = ai_query_main.effective_requested_hotels(
+            {
+                "query_plan": {"query_object_type": "hotel_group"},
+                "resolved_entities": {
+                    "hotel_group": {
+                        "group_token": "富力",
+                        "member_hotels": ["广州丽思卡尔顿酒店", "成都万达瑞华酒店"],
+                        "resolution_basis": "company_root_all_hotels",
+                        "use_group_token_as_filter": False,
+                    }
+                },
+                "requested_hotels": [],
+            }
+        )
+        self.assertEqual(result, [])
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_explain_sql_filters_pnl_hierarchy(self):
         sql = ai_query_main.build_explain_sql(
             {
@@ -421,13 +477,15 @@ class ServiceSmokeTests(unittest.TestCase):
                 "compare_mode": "budget",
                 "time_scope": "202601",
                 "query_plan": {"query_object_label": "富力体系酒店集合", "query_object_type": "hotel_group", "query_grain": "portfolio"},
+                "resolved_entities": {"hotel_group": {"group_token": "富力"}},
             },
-            requested_hotels=["广州富力丽思卡尔顿酒店及公寓", "香水湾富力万豪度假酒店"],
+            requested_hotels=["广州富力丽思卡尔顿酒店及公寓", "香水湾富力万豪度假酒店", "富力"],
         )
         self.assertIn("'富力体系酒店集合' AS hotel_name", sql)
         self.assertIn("COUNT(*) AS portfolio_member_count", sql)
         self.assertIn("SUM(o.TOTAL_INCOME_MTD_A) AS total_income_actual", sql)
         self.assertIn("SUM(o.OPERATING_PROFIT_MTD_A) AS actual_value", sql)
+        self.assertIn("LIKE '%富力%'", sql)
 
     @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
     def test_metric_response_uses_portfolio_breakdown_for_group_overview(self):
@@ -820,6 +878,32 @@ class ServiceSmokeTests(unittest.TestCase):
         )
         labels = [item["label"] for item in result]
         self.assertEqual(labels[:4], ["酒店", "品牌", "月份", "分析方式"])
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_monthly_hotel_count_sql_uses_overview_month(self):
+        sql = ai_query_main.build_monthly_hotel_count_sql(
+            {
+                "metric_code": "OPERATING_HOTEL_COUNT",
+                "time_scope": "202603",
+                "requested_areas": [],
+            },
+            allowed_hotels=["ALL"],
+            requested_hotels=[],
+            requested_areas=[],
+        )
+        self.assertIn("FROM wddm_dim_overview_cockpit_f o LEFT JOIN dim_allhotel_slcp s", sql)
+        self.assertIn("o.CALMONTH = '202603'", sql)
+        self.assertIn("COUNT(DISTINCT COALESCE", sql)
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_summarize_rows_for_monthly_hotel_count_mentions_period(self):
+        summary = ai_query_main.summarize_rows(
+            {"metric_code": "OPERATING_HOTEL_COUNT", "metric_name": "在营酒店数", "time_scope": "202603", "time_scope_explicit": True},
+            [{"hotel_name": "在营酒店数", "area": "全部范围", "actual_value": 94}],
+        )
+        self.assertIn("202603", summary)
+        self.assertIn("94 家", summary)
+        self.assertIn("wddm_dim_overview_cockpit_f", summary)
 
 
 if __name__ == "__main__":

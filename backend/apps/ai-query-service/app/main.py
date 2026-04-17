@@ -60,6 +60,7 @@ class QueryContext(BaseModel):
     time_scope: str | None = None
     language: str = "zh-CN"
     external_benchmark: bool = False
+    analysis_focus: str | None = None
 
 
 class QueryRequest(BaseModel):
@@ -426,6 +427,8 @@ def hotel_scope_clause(hotel_expression: str, requested_hotels: list[str]) -> st
                 candidates.append(candidate)
         if hotel_text.endswith(("酒店", "公寓")) and hotel_text not in precise_like_terms:
             precise_like_terms.append(hotel_text)
+        elif len(hotel_text) >= 2 and hotel_text not in precise_like_terms:
+            precise_like_terms.append(hotel_text)
     if not candidates:
         return None
 
@@ -508,6 +511,61 @@ SELECT
   NULL AS diff_value,
   NULL AS diff_rate
 FROM {_HOTEL_INFO_SOURCE_TABLE}
+WHERE {" AND ".join(where_clauses)}
+""".strip()
+
+
+def build_monthly_hotel_count_sql(
+    parsed: dict,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> str:
+    query_parts = build_overview_query_parts("wddm_dim_overview_cockpit_f")
+    time_scope = str(parsed.get("time_scope", "")).strip()
+    if not _TIME_SCOPE_RE.fullmatch(time_scope):
+        raise HTTPException(status_code=400, detail={"message": "monthly hotel count requires YYYYMM time_scope"})
+
+    where_clauses = [f"o.CALMONTH = {sql_literal(time_scope)}"]
+    area_scope = [str(area).strip() for area in (requested_areas or []) if str(area).strip()]
+    area_clause = dimension_scope_clause(query_parts["area_filter"], area_scope)
+    if area_clause:
+        where_clauses.append(area_clause)
+
+    dimension_filters = [
+        ("requested_manage_corps", "manage_corp_filter"),
+        ("requested_brand_children", "brand_child_filter"),
+        ("requested_builders", "builder_filter"),
+        ("requested_brand_levels", "brand_level_filter"),
+        ("requested_city_levels", "city_level_filter"),
+    ]
+    for parsed_key, query_key in dimension_filters:
+        clause = dimension_scope_clause(query_parts[query_key], [str(item).strip() for item in parsed.get(parsed_key, []) if str(item).strip()])
+        if clause:
+            where_clauses.append(clause)
+
+    explicit_hotel_scope = [str(hotel).strip() for hotel in (requested_hotels or []) if str(hotel).strip()]
+    hotel_clause = hotel_scope_clause(query_parts["hotel_search_filter"], explicit_hotel_scope)
+    if hotel_clause:
+        where_clauses.append(hotel_clause)
+
+    hotel_scope = [str(hotel).strip() for hotel in (allowed_hotels or []) if str(hotel).strip()]
+    if hotel_scope and hotel_scope != ["ALL"]:
+        scope_clause = hotel_scope_clause(query_parts["hotel_search_filter"], hotel_scope)
+        if scope_clause:
+            where_clauses.append(scope_clause)
+
+    scope_label = " / ".join(area_scope) if area_scope else "全部范围"
+    hotel_identity = "COALESCE(s.hotel_name_s, s.hotel_name_f, o.hotel_name)"
+    return f"""
+SELECT
+  '在营酒店数' AS hotel_name,
+  {sql_literal(scope_label)} AS area,
+  COUNT(DISTINCT {hotel_identity}) AS actual_value,
+  NULL AS compare_value,
+  NULL AS diff_value,
+  NULL AS diff_rate
+FROM {query_parts["from_clause"]}
 WHERE {" AND ".join(where_clauses)}
 """.strip()
 
@@ -711,8 +769,19 @@ def effective_requested_hotels(parsed: dict) -> list[str]:
     resolved_entities = parsed.get("resolved_entities") if isinstance(parsed.get("resolved_entities"), dict) else {}
     hotel_group = resolved_entities.get("hotel_group") if isinstance(resolved_entities.get("hotel_group"), dict) else {}
     scope_collection = resolved_entities.get("scope_collection") if isinstance(resolved_entities.get("scope_collection"), dict) else {}
+
+    def append_unique(items: list[str], value: object) -> None:
+        item = str(value).strip()
+        if item and item not in items:
+            items.append(item)
+
     if query_plan.get("query_object_type") == "hotel_group":
-        members = [str(item).strip() for item in hotel_group.get("member_hotels", []) if str(item).strip()]
+        if hotel_group.get("use_group_token_as_filter") is False:
+            return []
+        members: list[str] = []
+        for item in hotel_group.get("member_hotels", []):
+            append_unique(members, item)
+        append_unique(members, hotel_group.get("group_token"))
         if members:
             return members
     if query_plan.get("query_object_type") in {"area_scope", "manage_corp_scope", "brand_scope", "filtered_scope"}:
@@ -1149,7 +1218,9 @@ def summarize_rows(parsed: dict, rows: list[dict]) -> str:
     if str(parsed.get("metric_code") or "").strip() == "OPERATING_HOTEL_COUNT":
         actual_value = first_row.get("actual_value")
         area = str(first_row.get("area") or "全部范围").strip() or "全部范围"
-        return f"按当前口径统计，{area}在营酒店数为 {actual_value} 家。口径：dim_hotel_info.status = 1。"
+        if parsed.get("time_scope_explicit"):
+            return f"按 {time_scope} 月度经营数据统计，{area}在运营酒店数为 {actual_value} 家。口径：wddm_dim_overview_cockpit_f 当月有经营数据的酒店去重数。"
+        return f"按当前在营口径统计，{area}在营酒店数为 {actual_value} 家。口径：dim_hotel_info.status = 1。"
     query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
     if query_plan.get("query_grain") == "portfolio":
         object_label = query_plan.get("query_object_label") or first_row.get("hotel_name") or "当前组合"
@@ -1481,6 +1552,8 @@ def ai_query(payload: QueryRequest):
         {"question": payload.question, "time_scope": payload.context.time_scope},
         stage="semantic",
     )
+    if payload.context.analysis_focus:
+        parsed["analysis_focus"] = payload.context.analysis_focus
     timings["semantic_ms"] = elapsed_ms(stage_started)
     if parsed.get("needs_clarification"):
         timings["total_ms"] = elapsed_ms(request_started)
@@ -1522,15 +1595,27 @@ def ai_query(payload: QueryRequest):
 
     resolved_requested_hotels = effective_requested_hotels(parsed)
     query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
-    source_table = safe_identifier(str(metric_def.get("source_table", "wddm_dim_overview_cockpit_f")), "source_table")
+    metric_source_table = safe_identifier(str(metric_def.get("source_table", "wddm_dim_overview_cockpit_f")), "source_table")
+    use_monthly_hotel_count = (
+        parsed.get("metric_code") == "OPERATING_HOTEL_COUNT"
+        and bool(parsed.get("time_scope_explicit"))
+    )
+    source_table = "wddm_dim_overview_cockpit_f" if use_monthly_hotel_count else metric_source_table
     sql_text = (
-        build_hotel_count_sql(
+        build_monthly_hotel_count_sql(
             parsed,
             auth_scope.get("allowed_hotels", []),
             resolved_requested_hotels,
             parsed.get("requested_areas", []),
         )
-        if source_table == _HOTEL_INFO_SOURCE_TABLE
+        if use_monthly_hotel_count
+        else build_hotel_count_sql(
+            parsed,
+            auth_scope.get("allowed_hotels", []),
+            resolved_requested_hotels,
+            parsed.get("requested_areas", []),
+        )
+        if metric_source_table == _HOTEL_INFO_SOURCE_TABLE
         else build_explain_sql(
             parsed,
             auth_scope.get("allowed_hotels", []),
@@ -1764,9 +1849,12 @@ def ai_report(payload: ReportRequest):
         ]
 
     markdown_lines = [f"## {section['title']}\n{section['content']}" for section in sections]
+    report_summary = str(explanation.get("summary") or result.get("summary") or "")
+    if sections:
+        report_summary = f"已生成经营摘要：{sections[0].get('content') or report_summary}"
     return {
         "trace_id": result.get("trace_id"),
-        "summary": result.get("summary"),
+        "summary": report_summary,
         "report_sections": sections,
         "report_markdown": "\n\n".join(markdown_lines),
         "source_query": {

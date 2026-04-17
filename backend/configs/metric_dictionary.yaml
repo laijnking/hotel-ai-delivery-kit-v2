@@ -54,3 +54,16 @@ metrics:
         actual: INCOME_PER_ROOM_MTD_A
         budget: INCOME_PER_ROOM_MTD_B
         last_year: INCOME_PER_ROOM_MTD_L
+
+  - metric_code: OPERATING_HOTEL_COUNT
+    name_cn: 在营酒店数
+    aliases:
+      - 在营酒店数
+      - 在营酒店
+      - 运营酒店数
+      - 目前在运营的酒店有多少家
+      - 在运营的酒店有多少家
+      - 营业酒店数
+      - 开业酒店数
+      - 酒店数量
+    source_table: dim_hotel_info

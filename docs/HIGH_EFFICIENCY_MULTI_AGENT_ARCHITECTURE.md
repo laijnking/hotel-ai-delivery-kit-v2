@@ -473,3 +473,83 @@ sequenceDiagram
 - 组合结果的内部对标
 - 更自然的分析模式中文映射
 - 更完整的语义图谱对象类型
+
+## 14. 第二阶段推进进展
+
+在第一阶段最小骨架基础上，当前代码又往 `Planner + Semantic Graph` 继续推进了一步：
+
+- `semantic-service`
+  - 新增运行时 `scope_graph`，基于最新账期经营宽表和酒店维表联合生成酒店节点
+  - 已支持把 `区域 / 管理公司 / 品牌 / 建设来源 / 档次 / 城市等级` 组合条件解析成 `resolved_entities.scope_collection`
+  - `scope_collection` 会返回 `scope_type / label / member_hotels / member_count / applied_filters`
+  - `query_plan.resolved_hotel_count` 不再只支持 `hotel_group`，也能反映区域、品牌、管理公司等组织口径下的酒店集合规模
+  - 统计类问题如“目前在运营的酒店有多少家”已使用独立 `analysis_mode=scope_stat_snapshot`
+
+- `ai-query-service`
+  - 已支持读取 `resolved_entities.scope_collection.member_hotels`
+  - 当问题属于 `area_scope / manage_corp_scope / brand_scope / filtered_scope` 时，会把这些成员作为组合查询的有效酒店集合
+  - 新增面向 `dim_hotel_info` 的统计查询路径，用于“在营酒店数”这类非经营宽表型指标
+
+- 在线回归结果
+  - “查一下万达所有酒店的总体经营情况”会识别为 `manage_corp_scope`，并展开出 `51` 家酒店作为组合样本
+  - “目前在运营的酒店有多少家”会识别为统计类问题，并按 `dim_hotel_info.status = 1` 返回 `83` 家
+
+这说明当前系统已经不只是“识别一个范围标签”，而是开始具备：
+
+- 组织口径识别
+- 作用域集合展开
+- 统计类问题与经营类问题分流
+- Planner 与 Semantic Graph 协同产出查询对象
+
+下一步更适合进入第三阶段，也就是继续把：
+
+- `Analysis Agent` 做成稳定的经营分析分层输出
+- `Narrative Agent` 做成更专业的酒店经营专家表达
+- `Learning Agent` 和 `External Benchmark Provider` 作为异步增强层接入
+
+## 15. 第三阶段推进进展
+
+当前代码已经开始把 `Learning Agent + External Benchmark Provider` 从概念层推进到可运行的底座能力：
+
+- `ai-query-service`
+  - 新增 `GET /api/v1/system/learning/summary?days=7`
+  - 会从 `backend/runtime/learning_inbox` 聚合最近学习样本
+  - 返回原因分布、指标分布、查询对象类型分布、阶段分布和最近样本列表
+  - 学习样本写回时，已补充 `metric_code / compare_mode / query_object_type / query_grain / analysis_mode / external_benchmark_status` 等元数据
+
+- `External Benchmark Provider`
+  - 不再只有单一的 `manual_review` 占位状态
+  - 当前已按配置分流为：
+    - `manual_review`
+    - `uploaded_dataset`
+    - `industry_api`
+    - `web_research`
+  - 每个 Provider 都会返回独立的 `status / dimensions / disclaimers`
+  - `uploaded_dataset` 会检查本地外部数据目录是否已有文件
+  - `industry_api` 会检查 API 是否已配置
+  - `web_research` 会返回联网研究状态和允许域名配置
+
+这说明系统已经从“把失败样本写入日志”和“提示将来可以接外部对标”，向前推进到了：
+
+- 学习样本可回看
+- 学习样本可统计
+- Provider 状态可区分
+- 前端可以据此明确展示“已开启外部对标”到底意味着什么
+
+当前仍然保留的边界：
+
+- `Learning Agent` 还没有自动生成候选规则或自动回写配置
+- `uploaded_dataset` 还没有真正接入统一外部样本仓
+- `industry_api` 和 `web_research` 还没有进入真实联网抓取执行链
+
+因此下一步最适合继续推进：
+
+- 基于 `learning/summary` 自动挑选 Harness 回归样本
+- 把 `uploaded_dataset` 接成真正可读取的外部行业样本源
+- 把受控联网抓取挂到 `industry_api` 或 `web_research` Provider 下
+
+当前已补上第一步的基础接口：
+
+- `GET /api/v1/system/learning/harness-candidates`
+
+该接口会从最近学习样本中自动抽取候选问题，并生成适合 Harness 使用的候选 case 结构，作为后续“自动扩充 eval case 集”的第一层入口。

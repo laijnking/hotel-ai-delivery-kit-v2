@@ -13,6 +13,13 @@ synonyms:
   每房收益: REVPAR
   RevPAR: REVPAR
   revpar: REVPAR
+  在营酒店数: OPERATING_HOTEL_COUNT
+  在营酒店: OPERATING_HOTEL_COUNT
+  运营酒店数: OPERATING_HOTEL_COUNT
+  在运营的酒店有多少家: OPERATING_HOTEL_COUNT
+  目前在运营的酒店有多少家: OPERATING_HOTEL_COUNT
+  营业酒店数: OPERATING_HOTEL_COUNT
+  开业酒店数: OPERATING_HOTEL_COUNT
 
 intents:
   排名: rank

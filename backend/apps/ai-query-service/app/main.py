@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from datetime import datetime, timezone
@@ -22,12 +23,21 @@ DB_EXECUTOR_SERVICE_URL = os.getenv("DB_EXECUTOR_SERVICE_URL", "http://127.0.0.1
 AUDIT_SERVICE_URL = os.getenv("AUDIT_SERVICE_URL", "http://127.0.0.1:8107")
 SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "45"))
 EXTERNAL_BENCHMARK_PROVIDER = os.getenv("EXTERNAL_BENCHMARK_PROVIDER", "manual_review").strip() or "manual_review"
+EXTERNAL_BENCHMARK_DATASET_DIR = Path(
+    os.getenv("EXTERNAL_BENCHMARK_DATASET_DIR", Path(__file__).resolve().parents[3] / "runtime" / "external_benchmark")
+)
+EXTERNAL_BENCHMARK_API_BASE_URL = os.getenv("EXTERNAL_BENCHMARK_API_BASE_URL", "").strip()
+EXTERNAL_BENCHMARK_API_KEY = os.getenv("EXTERNAL_BENCHMARK_API_KEY", "").strip()
+EXTERNAL_BENCHMARK_ALLOWED_DOMAINS = [
+    item.strip() for item in os.getenv("EXTERNAL_BENCHMARK_ALLOWED_DOMAINS", "").split(",") if item.strip()
+]
 APP_SETTINGS = Path(__file__).resolve().parents[3] / "configs" / "app_settings.yaml"
 LEARNING_INBOX_DIR = Path(os.getenv("LEARNING_INBOX_DIR", Path(__file__).resolve().parents[3] / "runtime" / "learning_inbox"))
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TIME_SCOPE_RE = re.compile(r"^\d{6}$")
 _OVERVIEW_SOURCE_TABLES = {"ads_hotel_operation_overview_wide", "wddm_dim_overview_cockpit_f"}
 _DETAIL_SOURCE_TABLE = "vw_pnl_fact"
+_HOTEL_INFO_SOURCE_TABLE = "dim_hotel_info"
 HTTP_CLIENT = httpx.Client(timeout=SERVICE_TIMEOUT, trust_env=False)
 
 app = FastAPI(title="ai-query-service")
@@ -94,6 +104,30 @@ def system_settings():
         "model_config": model_config,
         "answer_templates": settings.get("answer_templates", {}),
         "tuning_stages": settings.get("tuning_stages", []),
+    }
+
+
+@app.get("/api/v1/system/learning/summary")
+def system_learning_summary(days: int = 7):
+    window_days = max(1, min(int(days or 7), 30))
+    records = read_learning_records(window_days)
+    return {
+        "window_days": window_days,
+        "inbox_dir": str(LEARNING_INBOX_DIR),
+        "summary": summarize_learning_records(records),
+    }
+
+
+@app.get("/api/v1/system/learning/harness-candidates")
+def system_learning_harness_candidates(days: int = 7, limit: int = 10):
+    window_days = max(1, min(int(days or 7), 30))
+    candidate_limit = max(1, min(int(limit or 10), 50))
+    records = read_learning_records(window_days)
+    candidates = build_harness_candidates(records, candidate_limit)
+    return {
+        "window_days": window_days,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
     }
 
 
@@ -182,6 +216,181 @@ def write_learning_sample(
     return target
 
 
+def _learning_metadata(
+    parsed: dict | None,
+    *,
+    external_benchmark_requested: bool = False,
+    external_benchmark: dict | None = None,
+    internal_benchmark: dict | None = None,
+) -> dict[str, object]:
+    parsed = parsed or {}
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    metadata: dict[str, object] = {
+        "metric_code": parsed.get("metric_code"),
+        "compare_mode": parsed.get("compare_mode"),
+        "intent": parsed.get("intent"),
+        "time_scope": parsed.get("time_scope"),
+        "query_object_type": query_plan.get("query_object_type"),
+        "query_grain": query_plan.get("query_grain"),
+        "analysis_mode": query_plan.get("analysis_mode"),
+        "query_object_label": query_plan.get("query_object_label"),
+        "requested_hotels": parsed.get("requested_hotels", []),
+        "requested_areas": parsed.get("requested_areas", []),
+        "requested_manage_corps": parsed.get("requested_manage_corps", []),
+        "requested_brand_children": parsed.get("requested_brand_children", []),
+        "external_benchmark_requested": external_benchmark_requested,
+    }
+    if isinstance(internal_benchmark, dict):
+        metadata["internal_benchmark_scope"] = internal_benchmark.get("scope_used")
+        metadata["internal_peer_count"] = internal_benchmark.get("peer_count")
+    if isinstance(external_benchmark, dict):
+        metadata["external_benchmark_provider"] = external_benchmark.get("provider")
+        metadata["external_benchmark_status"] = external_benchmark.get("status")
+    return metadata
+
+
+def read_learning_records(days: int = 7) -> list[dict]:
+    LEARNING_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = []
+    for path in sorted(LEARNING_INBOX_DIR.glob("learning-*.jsonl")):
+        try:
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                created_at = str(record.get("created_at_utc") or "").strip()
+                if days > 0 and created_at:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        age_seconds = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                        if age_seconds > days * 86400:
+                            continue
+                    except ValueError:
+                        pass
+                records.append(record)
+        except OSError:
+            continue
+    return records
+
+
+def summarize_learning_records(records: list[dict]) -> dict[str, object]:
+    reason_counter: Counter[str] = Counter()
+    metric_counter: Counter[str] = Counter()
+    object_counter: Counter[str] = Counter()
+    stage_counter: Counter[str] = Counter()
+    latest_samples: list[dict[str, object]] = []
+
+    def top_items(counter: Counter[str], label_key: str) -> list[dict[str, object]]:
+        return [{label_key: key, "count": count} for key, count in counter.most_common(5)]
+
+    sorted_records = sorted(
+        (record for record in records if isinstance(record, dict)),
+        key=lambda item: str(item.get("created_at_utc") or ""),
+        reverse=True,
+    )
+    for record in sorted_records:
+        reason_counter[str(record.get("reason") or "unknown")] += 1
+        stage_counter[str(record.get("stage") or "unknown")] += 1
+        parsed = record.get("parsed_intent") if isinstance(record.get("parsed_intent"), dict) else {}
+        extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+        metric_counter[str(extra.get("metric_code") or parsed.get("metric_code") or "unknown")] += 1
+        object_counter[str(extra.get("query_object_type") or parsed.get("query_plan", {}).get("query_object_type") or "unknown")] += 1
+        if len(latest_samples) < 5:
+            latest_samples.append(
+                {
+                    "created_at_utc": record.get("created_at_utc"),
+                    "trace_id": record.get("trace_id"),
+                    "reason": record.get("reason"),
+                    "question": record.get("question"),
+                    "metric_code": extra.get("metric_code") or parsed.get("metric_code"),
+                    "query_object_type": extra.get("query_object_type") or parsed.get("query_plan", {}).get("query_object_type"),
+                }
+            )
+
+    return {
+        "sample_count": len(records),
+        "reason_breakdown": top_items(reason_counter, "reason"),
+        "metric_breakdown": top_items(metric_counter, "metric_code"),
+        "query_object_breakdown": top_items(object_counter, "query_object_type"),
+        "stage_breakdown": top_items(stage_counter, "stage"),
+        "latest_samples": latest_samples,
+    }
+
+
+def _case_id_from_question(question: str, index: int) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", question.lower()).strip("_")
+    if len(normalized) >= 6:
+        return normalized[:48] + f"_{index}"
+    return f"learning_case_{index}"
+
+
+def _metric_sql_contains(metric_code: str | None) -> list[str]:
+    mapping = {
+        "TOTAL_INCOME": ["wddm_dim_overview_cockpit_f", "TOTAL_INCOME_MTD_A"],
+        "OPERATING_PROFIT": ["wddm_dim_overview_cockpit_f", "OPERATING_PROFIT_MTD_A"],
+        "OPERATING_HOTEL_COUNT": ["dim_hotel_info", "status = 1"],
+    }
+    return mapping.get(str(metric_code or "").strip(), [])
+
+
+def build_harness_candidates(records: list[dict], limit: int = 10) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    seen_questions: set[str] = set()
+    sorted_records = sorted(
+        (record for record in records if isinstance(record, dict)),
+        key=lambda item: str(item.get("created_at_utc") or ""),
+        reverse=True,
+    )
+    for index, record in enumerate(sorted_records, start=1):
+        question = str(record.get("question") or "").strip()
+        if not question or question in seen_questions:
+            continue
+        parsed = record.get("parsed_intent") if isinstance(record.get("parsed_intent"), dict) else {}
+        extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+        metric_code = str(extra.get("metric_code") or parsed.get("metric_code") or "").strip() or None
+        if not metric_code:
+            continue
+        expected: dict[str, object] = {
+            "metric_code": metric_code,
+            "compare_mode": parsed.get("compare_mode"),
+            "time_scope": parsed.get("time_scope"),
+            "requested_hotels": parsed.get("requested_hotels", []),
+            "requested_areas": parsed.get("requested_areas", []),
+        }
+        if parsed.get("skill_id"):
+            expected["skill_id"] = parsed.get("skill_id")
+        query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+        if query_plan.get("query_object_type"):
+            expected["query_object_type"] = query_plan.get("query_object_type")
+        if query_plan.get("query_grain"):
+            expected["query_grain"] = query_plan.get("query_grain")
+
+        candidate = {
+            "id": _case_id_from_question(question, index),
+            "question": question,
+            "time_scope": str(parsed.get("time_scope") or extra.get("time_scope") or "202601"),
+            "reason": record.get("reason"),
+            "source_trace_id": record.get("trace_id"),
+            "expected": {key: value for key, value in expected.items() if value not in (None, "", [])},
+            "sql_assertions": {"contains": _metric_sql_contains(metric_code)},
+            "notes": [
+                f"generated_from_learning_reason={record.get('reason')}",
+                f"generated_at={record.get('created_at_utc')}",
+            ],
+        }
+        candidates.append(candidate)
+        seen_questions.add(question)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def safe_identifier(value: str, label: str) -> str:
     candidate = value.strip()
     if not _IDENTIFIER_RE.fullmatch(candidate):
@@ -240,6 +449,67 @@ def dimension_scope_clause(expression: str, values: list[str]) -> str | None:
     exact_clause = f"{expression} IN ({', '.join(sql_literal(item) for item in candidates)})"
     like_clauses = [f"{expression} LIKE {sql_like_literal(item)}" for item in candidates if len(item) >= 2]
     return "(" + " OR ".join([exact_clause, *like_clauses]) + ")"
+
+
+def build_hotel_count_sql(
+    parsed: dict,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> str:
+    where_clauses = ["status = 1"]
+
+    area_scope = [str(area).strip() for area in (requested_areas or []) if str(area).strip()]
+    if area_scope:
+        area_clause = ", ".join(sql_literal(area) for area in area_scope)
+        where_clauses.append(f"area IN ({area_clause})")
+
+    dimension_filters = [
+        ("requested_manage_corps", "manage_corp"),
+        ("requested_brand_children", "hotel_brand"),
+        ("requested_builders", "Builder"),
+        ("requested_brand_levels", "brand_level"),
+        ("requested_city_levels", "city_level"),
+    ]
+    for parsed_key, column in dimension_filters:
+        clause = dimension_scope_clause(column, [str(item).strip() for item in parsed.get(parsed_key, []) if str(item).strip()])
+        if clause:
+            where_clauses.append(clause)
+
+    explicit_hotel_scope = [str(hotel).strip() for hotel in (requested_hotels or []) if str(hotel).strip()]
+    if explicit_hotel_scope:
+        clauses: list[str] = []
+        for hotel in explicit_hotel_scope:
+            for candidate in hotel_name_candidates(hotel):
+                like_sql = sql_like_literal(candidate)
+                clauses.append(f"hotel_fname LIKE {like_sql}")
+                clauses.append(f"hotel_sname LIKE {like_sql}")
+        if clauses:
+            where_clauses.append("(" + " OR ".join(dict.fromkeys(clauses)) + ")")
+
+    hotel_scope = [str(hotel).strip() for hotel in (allowed_hotels or []) if str(hotel).strip()]
+    if hotel_scope and hotel_scope != ["ALL"]:
+        clauses: list[str] = []
+        for hotel in hotel_scope:
+            for candidate in hotel_name_candidates(hotel):
+                like_sql = sql_like_literal(candidate)
+                clauses.append(f"hotel_fname LIKE {like_sql}")
+                clauses.append(f"hotel_sname LIKE {like_sql}")
+        if clauses:
+            where_clauses.append("(" + " OR ".join(dict.fromkeys(clauses)) + ")")
+
+    scope_label = " / ".join(area_scope) if area_scope else "全部范围"
+    return f"""
+SELECT
+  '在营酒店数' AS hotel_name,
+  {sql_literal(scope_label)} AS area,
+  COUNT(DISTINCT hotel_code) AS actual_value,
+  NULL AS compare_value,
+  NULL AS diff_value,
+  NULL AS diff_rate
+FROM {_HOTEL_INFO_SOURCE_TABLE}
+WHERE {" AND ".join(where_clauses)}
+""".strip()
 
 
 def build_overview_query_parts(source_table: str) -> dict[str, str]:
@@ -440,8 +710,13 @@ def effective_requested_hotels(parsed: dict) -> list[str]:
     query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
     resolved_entities = parsed.get("resolved_entities") if isinstance(parsed.get("resolved_entities"), dict) else {}
     hotel_group = resolved_entities.get("hotel_group") if isinstance(resolved_entities.get("hotel_group"), dict) else {}
+    scope_collection = resolved_entities.get("scope_collection") if isinstance(resolved_entities.get("scope_collection"), dict) else {}
     if query_plan.get("query_object_type") == "hotel_group":
         members = [str(item).strip() for item in hotel_group.get("member_hotels", []) if str(item).strip()]
+        if members:
+            return members
+    if query_plan.get("query_object_type") in {"area_scope", "manage_corp_scope", "brand_scope", "filtered_scope"}:
+        members = [str(item).strip() for item in scope_collection.get("member_hotels", []) if str(item).strip()]
         if members:
             return members
     return [str(item).strip() for item in parsed.get("requested_hotels", []) if str(item).strip()]
@@ -871,6 +1146,10 @@ def summarize_rows(parsed: dict, rows: list[dict]) -> str:
     if not rows:
         return f"{metric_name} 在 {time_scope} 未查询到结果。"
     first_row = rows[0]
+    if str(parsed.get("metric_code") or "").strip() == "OPERATING_HOTEL_COUNT":
+        actual_value = first_row.get("actual_value")
+        area = str(first_row.get("area") or "全部范围").strip() or "全部范围"
+        return f"按当前口径统计，{area}在营酒店数为 {actual_value} 家。口径：dim_hotel_info.status = 1。"
     query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
     if query_plan.get("query_grain") == "portfolio":
         object_label = query_plan.get("query_object_label") or first_row.get("hotel_name") or "当前组合"
@@ -979,9 +1258,7 @@ def build_internal_benchmark(rows: list[dict], metric_def: dict, parsed: dict) -
     return fallback
 
 
-def build_external_benchmark_stub(parsed: dict, internal_benchmark: dict[str, object] | None, enabled: bool) -> dict[str, object] | None:
-    if not enabled:
-        return None
+def _external_benchmark_dimensions(parsed: dict) -> list[str]:
     dimensions: list[str] = []
     mappings = [
         ("requested_areas", "区域"),
@@ -995,16 +1272,22 @@ def build_external_benchmark_stub(parsed: dict, internal_benchmark: dict[str, ob
         values = [str(item).strip() for item in parsed.get(key, []) if str(item).strip()]
         if values:
             dimensions.append(f"{label}：{' / '.join(values[:3])}")
+    return dimensions
 
-    sample_hint = None
+
+def _internal_sample_hint(internal_benchmark: dict[str, object] | None) -> str | None:
     if isinstance(internal_benchmark, dict) and int(internal_benchmark.get("peer_count") or 0) > 0:
-        sample_hint = f"内部已找到 {internal_benchmark.get('scope_used') or '同口径'} 样本 {int(internal_benchmark.get('peer_count') or 0)} 家，可先作为管理口径基准。"
+        return f"内部已找到 {internal_benchmark.get('scope_used') or '同口径'} 样本 {int(internal_benchmark.get('peer_count') or 0)} 家，可先作为管理口径基准。"
+    return None
 
+
+def _manual_review_benchmark(parsed: dict, internal_benchmark: dict[str, object] | None) -> dict[str, object]:
+    sample_hint = _internal_sample_hint(internal_benchmark)
     return {
         "requested": True,
-        "provider": EXTERNAL_BENCHMARK_PROVIDER,
+        "provider": "manual_review",
         "status": "awaiting_provider",
-        "dimensions": dimensions,
+        "dimensions": _external_benchmark_dimensions(parsed),
         "message": "你已开启外部行业对标。当前系统会先返回内部经营对标，外部行业数据需按所选 Provider 联网补充后再展示。",
         "disclaimers": [
             "外部行业样本的口径、更新频率和覆盖范围可能与公司内部口径不完全一致，结果需要结合来源说明一起阅读。",
@@ -1012,6 +1295,72 @@ def build_external_benchmark_stub(parsed: dict, internal_benchmark: dict[str, ob
             sample_hint or "若当前问题已有内部同口径样本，建议优先参考内部对标，再决定是否补充外部行业样本。",
         ],
     }
+
+
+def _uploaded_dataset_benchmark(parsed: dict, internal_benchmark: dict[str, object] | None) -> dict[str, object]:
+    sample_hint = _internal_sample_hint(internal_benchmark)
+    EXTERNAL_BENCHMARK_DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    dataset_files = [path.name for path in sorted(EXTERNAL_BENCHMARK_DATASET_DIR.glob("*")) if path.is_file()]
+    ready = bool(dataset_files)
+    return {
+        "requested": True,
+        "provider": "uploaded_dataset",
+        "status": "ready_dataset_available" if ready else "dataset_missing",
+        "dimensions": _external_benchmark_dimensions(parsed),
+        "message": "当前外部对标按本地上传数据集模式执行。" if ready else "尚未在本地检测到可用的外部行业数据集。",
+        "datasets": dataset_files[:10],
+        "disclaimers": [
+            f"已检测到 {len(dataset_files)} 个外部数据文件。" if ready else "请先导入行业月报或市场对标数据文件，再启用该 Provider。",
+            sample_hint or "在外部数据集就绪前，建议优先阅读内部对标结果。",
+        ],
+    }
+
+
+def _industry_api_benchmark(parsed: dict, internal_benchmark: dict[str, object] | None) -> dict[str, object]:
+    sample_hint = _internal_sample_hint(internal_benchmark)
+    configured = bool(EXTERNAL_BENCHMARK_API_BASE_URL and EXTERNAL_BENCHMARK_API_KEY)
+    return {
+        "requested": True,
+        "provider": "industry_api",
+        "status": "provider_ready" if configured else "provider_not_configured",
+        "dimensions": _external_benchmark_dimensions(parsed),
+        "message": "外部行业 API 已就绪，可以按当前维度继续拉取对标样本。" if configured else "外部行业 API 尚未配置，当前仍以内部对标为主。",
+        "disclaimers": [
+            "API 对标结果必须同时展示来源、口径、抓取时间和失败回退状态。",
+            sample_hint or "在 API Provider 配置完成前，建议优先参考内部对标。",
+        ],
+    }
+
+
+def _web_research_benchmark(parsed: dict, internal_benchmark: dict[str, object] | None) -> dict[str, object]:
+    sample_hint = _internal_sample_hint(internal_benchmark)
+    return {
+        "requested": True,
+        "provider": "web_research",
+        "status": "ready_for_research",
+        "dimensions": _external_benchmark_dimensions(parsed),
+        "message": "当前可基于联网搜索补充公开行业摘要，但需要将来源链接、发布日期和口径一起展示。",
+        "allowed_domains": EXTERNAL_BENCHMARK_ALLOWED_DOMAINS,
+        "disclaimers": [
+            "搜索聚合型 Provider 默认只适用于公开行业摘要，不直接等同于可审计的经营样本库。",
+            sample_hint or "若内部样本已经足够，建议先以内对标作为管理口径基线。",
+        ],
+    }
+
+
+def build_external_benchmark_stub(parsed: dict, internal_benchmark: dict[str, object] | None, enabled: bool) -> dict[str, object] | None:
+    if not enabled:
+        return None
+    provider_map = {
+        "manual_review": _manual_review_benchmark,
+        "uploaded_dataset": _uploaded_dataset_benchmark,
+        "industry_api": _industry_api_benchmark,
+        "web_research": _web_research_benchmark,
+    }
+    provider = EXTERNAL_BENCHMARK_PROVIDER
+    result = provider_map.get(provider, _manual_review_benchmark)(parsed, internal_benchmark)
+    result["provider"] = provider
+    return result
 
 
 def shift_month_label(time_scope: str | None, offset: int) -> str | None:
@@ -1145,7 +1494,10 @@ def ai_query(payload: QueryRequest):
             parsed=parsed,
             row_count=0,
             warnings=["clarification_required"],
-            extra={"clarification_options": clarification_options},
+            extra={
+                "clarification_options": clarification_options,
+                **_learning_metadata(parsed, external_benchmark_requested=payload.context.external_benchmark),
+            },
         )
         return {
             "trace_id": trace_id,
@@ -1170,8 +1522,16 @@ def ai_query(payload: QueryRequest):
 
     resolved_requested_hotels = effective_requested_hotels(parsed)
     query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    source_table = safe_identifier(str(metric_def.get("source_table", "wddm_dim_overview_cockpit_f")), "source_table")
     sql_text = (
-        build_explain_sql(
+        build_hotel_count_sql(
+            parsed,
+            auth_scope.get("allowed_hotels", []),
+            resolved_requested_hotels,
+            parsed.get("requested_areas", []),
+        )
+        if source_table == _HOTEL_INFO_SOURCE_TABLE
+        else build_explain_sql(
             parsed,
             auth_scope.get("allowed_hotels", []),
             resolved_requested_hotels,
@@ -1203,8 +1563,9 @@ def ai_query(payload: QueryRequest):
             "metric_code": parsed["metric_code"],
             "allowed_hotels": auth_scope.get("allowed_hotels", []),
             "allowed_areas": auth_scope.get("allowed_areas", []),
-            "hotel_column": auth_scope.get("sql_scope", {}).get("hotel_column", "HOTEL_NAME_s"),
+            "hotel_column": "hotel_fname" if source_table == _HOTEL_INFO_SOURCE_TABLE else auth_scope.get("sql_scope", {}).get("hotel_column", "HOTEL_NAME_s"),
             "area_column": auth_scope.get("sql_scope", {}).get("area_column", "area"),
+            "require_time_filter": source_table != _HOTEL_INFO_SOURCE_TABLE,
         },
         stage="sql-guardrail",
     )
@@ -1272,29 +1633,42 @@ def ai_query(payload: QueryRequest):
     external_benchmark = build_external_benchmark_stub(parsed, internal_benchmark, payload.context.external_benchmark)
 
     summary = summarize_rows({**parsed, "metric_name": metric_def.get("name_cn")}, rows)
-    try:
-        stage_started = time.perf_counter()
-        explained = request_json(
-            "POST",
-            f"{EXPLANATION_SERVICE_URL}/api/v1/explain/metric",
-            {
-                "question": payload.question,
-                "parsed_intent": parsed,
-                "rows": rows,
-                "portfolio_breakdown": portfolio_breakdown,
-                "portfolio_outliers": portfolio_outliers,
-                "peer_benchmark": internal_benchmark,
-                "external_benchmark_requested": payload.context.external_benchmark,
-            },
-            stage="explanation",
-        )
-        timings["explanation_ms"] = elapsed_ms(stage_started)
-        summary = str(explained.get("summary") or summary)
-        explanation_payload = explained
-    except HTTPException as exc:
-        timings["explanation_ms"] = elapsed_ms(stage_started)
-        explanation_payload = {}
-        warnings.append(f"explanation fallback: {exc.detail}")
+    if parsed.get("metric_code") == "OPERATING_HOTEL_COUNT":
+        timings["explanation_ms"] = 0
+        explanation_payload = {
+            "summary": summary,
+            "management_summary": [summary, "该统计直接来源于 dim_hotel_info，不受前端展示条数影响。"],
+            "risks": ["如需更细口径，可继续限定区域、品牌、管理公司或具体酒店范围。"],
+            "suggestions": ["可以继续追问：只看华南区在营酒店数、只看万豪品牌在营酒店数。"],
+            "report_sections": [
+                {"title": "统计口径", "content": "当前按 dim_hotel_info.status = 1 统计在营酒店数。"},
+                {"title": "结果", "content": summary},
+            ],
+        }
+    else:
+        try:
+            stage_started = time.perf_counter()
+            explained = request_json(
+                "POST",
+                f"{EXPLANATION_SERVICE_URL}/api/v1/explain/metric",
+                {
+                    "question": payload.question,
+                    "parsed_intent": parsed,
+                    "rows": rows,
+                    "portfolio_breakdown": portfolio_breakdown,
+                    "portfolio_outliers": portfolio_outliers,
+                    "peer_benchmark": internal_benchmark,
+                    "external_benchmark_requested": payload.context.external_benchmark,
+                },
+                stage="explanation",
+            )
+            timings["explanation_ms"] = elapsed_ms(stage_started)
+            summary = str(explained.get("summary") or summary)
+            explanation_payload = explained
+        except HTTPException as exc:
+            timings["explanation_ms"] = elapsed_ms(stage_started)
+            explanation_payload = {}
+            warnings.append(f"explanation fallback: {exc.detail}")
 
     reason = learning_reason(parsed, rows, warnings)
     if reason:
@@ -1308,6 +1682,12 @@ def ai_query(payload: QueryRequest):
             rewritten_sql=sql_plan.get("rewritten_sql"),
             row_count=row_count,
             warnings=warnings,
+            extra=_learning_metadata(
+                parsed,
+                external_benchmark_requested=payload.context.external_benchmark,
+                external_benchmark=external_benchmark,
+                internal_benchmark=internal_benchmark,
+            ),
         )
 
     try:

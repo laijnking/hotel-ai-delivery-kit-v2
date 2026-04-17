@@ -138,10 +138,45 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(result["query_plan"]["resolved_hotel_count"], 2)
         self.assertEqual(result["resolved_entities"]["hotel_group"]["group_token"], "富力")
 
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_recognizes_operating_hotel_count_metric(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(question="目前在运营的酒店有多少家？", time_scope="202601")
+            )
+        self.assertEqual(result["metric_code"], "OPERATING_HOTEL_COUNT")
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_builds_scope_collection_for_area_portfolio(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(question="查一下华南区所有酒店的总体经营情况", time_scope="202601")
+            )
+        self.assertEqual(result["query_plan"]["query_object_type"], "area_scope")
+        self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
+        self.assertGreaterEqual(result["query_plan"]["resolved_hotel_count"], 2)
+        self.assertEqual(result["resolved_entities"]["scope_collection"]["scope_type"], "area_scope")
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_builds_scope_collection_for_manage_corp_portfolio(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(question="查一下万达所有酒店的总体经营情况", time_scope="202601")
+            )
+        self.assertEqual(result["query_plan"]["query_object_type"], "manage_corp_scope")
+        self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
+        self.assertGreaterEqual(result["query_plan"]["resolved_hotel_count"], 2)
+        self.assertEqual(result["resolved_entities"]["scope_collection"]["scope_type"], "manage_corp_scope")
+
     @unittest.skipIf(metric_main is None, f"metric-service deps missing: {metric_error}")
     def test_metric_alias_lookup(self):
         result = metric_main.get_metric("revenue")
         self.assertEqual(result["metric_code"], "TOTAL_INCOME")
+
+    @unittest.skipIf(metric_main is None, f"metric-service deps missing: {metric_error}")
+    def test_metric_alias_lookup_for_operating_hotel_count(self):
+        result = metric_main.get_metric("在营酒店数")
+        self.assertEqual(result["metric_code"], "OPERATING_HOTEL_COUNT")
 
     @unittest.skipIf(guardrail_main is None, f"guardrail-service deps missing: {guardrail_error}")
     def test_guardrail_injects_scope(self):
@@ -300,6 +335,35 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("s.brand_level", sql)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_hotel_count_sql_uses_dim_hotel_info_status(self):
+        sql = ai_query_main.build_hotel_count_sql(
+            {
+                "requested_areas": ["华南区"],
+                "requested_brand_children": ["万豪"],
+            },
+            requested_areas=["华南区"],
+        )
+        self.assertIn("FROM dim_hotel_info", sql)
+        self.assertIn("status = 1", sql)
+        self.assertIn("area IN ('华南区')", sql)
+        self.assertIn("hotel_brand IN ('万豪')", sql)
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_effective_requested_hotels_prefers_scope_collection_members(self):
+        result = ai_query_main.effective_requested_hotels(
+            {
+                "query_plan": {"query_object_type": "brand_scope"},
+                "resolved_entities": {
+                    "scope_collection": {
+                        "member_hotels": ["广州富力丽思卡尔顿酒店", "成都富力丽思卡尔顿酒店"]
+                    }
+                },
+                "requested_hotels": [],
+            }
+        )
+        self.assertEqual(result, ["广州富力丽思卡尔顿酒店", "成都富力丽思卡尔顿酒店"])
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_explain_sql_filters_pnl_hierarchy(self):
         sql = ai_query_main.build_explain_sql(
             {
@@ -421,6 +485,9 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("拉动较强的是 广州富力丽思卡尔顿酒店及公寓", result["summary"])
         self.assertIn("人工成本偏高的是 镇江富力喜来登酒店", result["summary"])
         self.assertIn("广州富力丽思卡尔顿酒店及公寓", " ".join(result["weakest_hotels"]))
+        self.assertGreaterEqual(len(result["management_summary"]), 2)
+        self.assertIn("组合观察", result["management_summary"][0])
+        self.assertEqual(len(result["suggestions"]), 3)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_external_benchmark_stub_returns_provider_metadata(self):
@@ -477,6 +544,9 @@ class ServiceSmokeTests(unittest.TestCase):
         result = explanation_main.explain(req)
         self.assertIn("内部对标采用 同区域同品牌同档次", result["report_sections"][-1]["content"])
         self.assertIn("外部行业对标", result["report_sections"][-1]["content"])
+        self.assertGreaterEqual(len(result["management_summary"]), 2)
+        self.assertIn("本次按 江门嘉华", result["management_summary"][0])
+        self.assertEqual(len(result["suggestions"]), 3)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_system_settings_exposes_tuning_config(self):
@@ -510,6 +580,88 @@ class ServiceSmokeTests(unittest.TestCase):
                 self.assertEqual(record["trace_id"], "trace_test")
                 self.assertEqual(record["reason"], "low_confidence_parse")
                 self.assertEqual(record["parsed_intent"]["confidence"], 0.5)
+            finally:
+                ai_query_main.LEARNING_INBOX_DIR = original_dir
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_system_learning_summary_aggregates_recent_samples(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_dir = ai_query_main.LEARNING_INBOX_DIR
+            ai_query_main.LEARNING_INBOX_DIR = Path(temp_dir)
+            try:
+                ai_query_main.write_learning_sample(
+                    trace_id="trace_1",
+                    question="为什么没有结果",
+                    stage="query",
+                    reason="empty_result",
+                    parsed={"metric_code": "TOTAL_INCOME", "query_plan": {"query_object_type": "single_hotel"}},
+                    row_count=0,
+                    extra={"metric_code": "TOTAL_INCOME", "query_object_type": "single_hotel"},
+                )
+                ai_query_main.write_learning_sample(
+                    trace_id="trace_2",
+                    question="查一下万达所有酒店",
+                    stage="semantic",
+                    reason="clarification_required",
+                    parsed={"metric_code": "OPERATING_PROFIT", "query_plan": {"query_object_type": "manage_corp_scope"}},
+                    row_count=0,
+                    extra={"metric_code": "OPERATING_PROFIT", "query_object_type": "manage_corp_scope"},
+                )
+                result = ai_query_main.system_learning_summary(days=7)
+                summary = result["summary"]
+                self.assertEqual(summary["sample_count"], 2)
+                self.assertEqual(summary["reason_breakdown"][0]["count"], 1)
+                self.assertEqual(len(summary["latest_samples"]), 2)
+                self.assertIn(summary["metric_breakdown"][0]["metric_code"], {"TOTAL_INCOME", "OPERATING_PROFIT"})
+            finally:
+                ai_query_main.LEARNING_INBOX_DIR = original_dir
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_external_benchmark_uploaded_dataset_reports_missing_dataset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_dir = ai_query_main.EXTERNAL_BENCHMARK_DATASET_DIR
+            original_provider = ai_query_main.EXTERNAL_BENCHMARK_PROVIDER
+            ai_query_main.EXTERNAL_BENCHMARK_DATASET_DIR = Path(temp_dir)
+            ai_query_main.EXTERNAL_BENCHMARK_PROVIDER = "uploaded_dataset"
+            try:
+                result = ai_query_main.build_external_benchmark_stub({"requested_areas": ["华南区"]}, None, True)
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(result["status"], "dataset_missing")
+                self.assertEqual(result["provider"], "uploaded_dataset")
+            finally:
+                ai_query_main.EXTERNAL_BENCHMARK_DATASET_DIR = original_dir
+                ai_query_main.EXTERNAL_BENCHMARK_PROVIDER = original_provider
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_system_learning_harness_candidates_returns_eval_ready_cases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_dir = ai_query_main.LEARNING_INBOX_DIR
+            ai_query_main.LEARNING_INBOX_DIR = Path(temp_dir)
+            try:
+                ai_query_main.write_learning_sample(
+                    trace_id="trace_eval_1",
+                    question="江门嘉华3月经营情况",
+                    stage="query",
+                    reason="low_confidence_parse",
+                    parsed={
+                        "metric_code": "OPERATING_PROFIT",
+                        "compare_mode": "budget",
+                        "time_scope": "202603",
+                        "skill_id": "hotel_operation_overview",
+                        "requested_hotels": ["江门嘉华"],
+                        "query_plan": {"query_object_type": "single_hotel", "query_grain": "hotel"},
+                    },
+                    row_count=0,
+                    extra={"metric_code": "OPERATING_PROFIT", "query_object_type": "single_hotel"},
+                )
+                result = ai_query_main.system_learning_harness_candidates(days=7, limit=5)
+                self.assertEqual(result["candidate_count"], 1)
+                candidate = result["candidates"][0]
+                self.assertEqual(candidate["expected"]["metric_code"], "OPERATING_PROFIT")
+                self.assertEqual(candidate["expected"]["skill_id"], "hotel_operation_overview")
+                self.assertEqual(candidate["expected"]["requested_hotels"], ["江门嘉华"])
+                self.assertIn("OPERATING_PROFIT_MTD_A", candidate["sql_assertions"]["contains"])
             finally:
                 ai_query_main.LEARNING_INBOX_DIR = original_dir
 

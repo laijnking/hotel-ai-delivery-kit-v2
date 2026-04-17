@@ -235,12 +235,95 @@ def _build_executive_sections(conclusion: str, risks: list[str], suggestions: li
     ]
 
 
+def _scope_label(parsed_intent: dict[str, Any] | None, fallback: str = "当前范围") -> str:
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    return str(query_plan.get("query_object_label") or fallback).strip() or fallback
+
+
+def _build_management_summary(
+    *,
+    metric_name: str,
+    parsed_intent: dict[str, Any] | None,
+    row: dict[str, Any],
+    summary: str,
+    portfolio_breakdown: list[dict[str, Any]] | None,
+    peer_benchmark: dict[str, Any] | None,
+) -> list[str]:
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    scope_label = _scope_label(parsed_intent, str(row.get("hotel_name") or "当前范围"))
+    analysis_mode = str(query_plan.get("analysis_mode") or "").strip()
+    management_summary: list[str] = []
+
+    if analysis_mode == "portfolio_overview":
+        member_count = row.get("portfolio_member_count")
+        management_summary.append(
+            f"本次按 {scope_label} 做组合观察，当前样本 {member_count or 'N/A'} 家，先看组合层面的收入、利润和成本效率。"
+        )
+        if isinstance(row.get("total_income_actual"), (int, float)) or isinstance(row.get("operating_profit_actual"), (int, float)):
+            management_summary.append(
+                f"组合总收入 {_format_amount(row.get('total_income_actual'))}，经营利润 {_format_amount(row.get('operating_profit_actual'))}，"
+                f"利润率 {_ratio_text(row.get('operating_profit_actual'), row.get('total_income_actual'))}。"
+            )
+        if portfolio_breakdown:
+            top = portfolio_breakdown[0]
+            management_summary.append(
+                f"如需继续下钻，可优先查看 {top.get('hotel_name') or '重点酒店'}，它已经进入当前组合的重点样本。"
+            )
+        elif isinstance(peer_benchmark, dict) and int(peer_benchmark.get("peer_count") or 0) > 0:
+            management_summary.append(
+                f"内部已找到 {peer_benchmark.get('scope_used') or '同口径'} 样本 {int(peer_benchmark.get('peer_count') or 0)} 家，可继续看组合相对位置。"
+            )
+        else:
+            management_summary.append(summary)
+        return management_summary
+
+    management_summary.append(
+        f"本次按 {scope_label} 返回 {metric_name} 的当前观察，先聚焦实际值、对比值和差额，再决定是否继续下钻原因。"
+    )
+    if isinstance(row.get("actual_value"), (int, float)) or isinstance(row.get("compare_value"), (int, float)):
+        management_summary.append(
+            f"当前实际 {_format_amount(row.get('actual_value'))}，对比 {_format_amount(row.get('compare_value'))}，差额 {_format_amount(row.get('diff_value'))}，差异率 {_format_percent(row.get('diff_rate'))}。"
+        )
+    if isinstance(peer_benchmark, dict) and int(peer_benchmark.get("peer_count") or 0) > 0:
+        management_summary.append(
+            f"内部同口径样本 {int(peer_benchmark.get('peer_count') or 0)} 家，可继续看收入质量、客房效率、利润质量和成本效率。"
+        )
+    else:
+        management_summary.append(summary)
+    return management_summary
+
+
+def _build_follow_up_suggestions(
+    metric_name: str,
+    parsed_intent: dict[str, Any] | None,
+    portfolio_breakdown: list[dict[str, Any]] | None,
+) -> list[str]:
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    analysis_mode = str(query_plan.get("analysis_mode") or "").strip()
+    scope_label = _scope_label(parsed_intent)
+    if analysis_mode == "portfolio_overview":
+        suggestions = [
+            f"继续下钻 {scope_label} 里拖累组合的酒店名单。",
+            "切换到同比变化，观察组合是预算偏差还是同比承压。",
+            "继续拆收入质量、客房效率、利润质量和成本效率四层结构。",
+        ]
+        if portfolio_breakdown:
+            suggestions.insert(0, f"优先展开 {portfolio_breakdown[0].get('hotel_name') or '重点酒店'} 的经营明细。")
+        return suggestions[:3]
+    return [
+        f"继续围绕 {metric_name} 展开原因拆解。",
+        "切换到同比变化，确认当前波动来自预算差还是同比变化。",
+        "补看同区域/同品牌/同档次内部对标样本。",
+    ]
+
+
 def _empty_response(metric: str, risk_text: str, suggestion_text: str) -> dict[str, Any]:
     summary = f"当前未查询到可用于解释 {metric} 的结果。"
     risks = [risk_text]
     suggestions = [suggestion_text]
     return {
         "summary": summary,
+        "management_summary": [summary],
         "risks": risks,
         "suggestions": suggestions,
         "report_sections": _build_executive_sections(summary, risks, suggestions),
@@ -368,6 +451,7 @@ def _build_explain_response(metric: str, rows: list[dict[str, Any]]) -> dict[str
     ]
     return {
         "summary": summary,
+        "management_summary": [summary, "建议先按驱动项区分收入端、成本端和费用端，再判断哪一层是主要波动来源。"],
         "drivers": drivers,
         "risks": risks,
         "suggestions": suggestions,
@@ -449,11 +533,18 @@ def _build_metric_response(
             "成本效率需要拆人工、能耗、餐饮成本、渠道费用和费用率。如果收入增长但这些成本费用增速更快，经营利润可能不会同步改善；当前结果尚未包含成本科目。",
             _build_benchmark_text(first, peer_insight, peer_benchmark, external_benchmark_requested),
         ]
-    suggestions = [
-        "继续按收入质量、客房效率、利润质量、成本效率和横向对标五个维度补齐数据。",
-    ]
+    management_summary = _build_management_summary(
+        metric_name=metric_name,
+        parsed_intent=parsed_intent,
+        row=first,
+        summary=summary,
+        portfolio_breakdown=portfolio_breakdown,
+        peer_benchmark=peer_benchmark,
+    )
+    suggestions = _build_follow_up_suggestions(metric_name, parsed_intent, portfolio_breakdown)
     return {
         "summary": summary,
+        "management_summary": management_summary,
         "key_points": key_points,
         "weakest_hotels": weakest,
         "risks": risks,
@@ -555,6 +646,8 @@ def _apply_llm_enhancement(question: str, parsed_intent: dict[str, Any], rows: l
 
     enhanced = dict(result)
     enhanced["summary"] = summary
+    if not enhanced.get("management_summary"):
+        enhanced["management_summary"] = [summary]
     enhanced["risks"] = [str(item) for item in risks]
     enhanced["suggestions"] = [str(item) for item in suggestions]
     enhanced["report_sections"] = _build_executive_sections(enhanced["summary"], enhanced["risks"], enhanced["suggestions"])

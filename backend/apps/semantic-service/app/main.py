@@ -32,6 +32,7 @@ _METRIC_LABELS = {
     "OPERATING_PROFIT": "经营利润",
     "TOTAL_INCOME": "总收入",
     "REVPAR": "每房收益",
+    "OPERATING_HOTEL_COUNT": "在营酒店数",
 }
 _BUSINESS_OVERVIEW_TERMS = ("经营情况", "经营状况", "经营表现", "经营概况", "营业情况", "整体情况", "总体情况")
 _SITUATION_TERMS = ("情况", "怎么样", "如何", "咋样", "表现")
@@ -250,6 +251,48 @@ def _fetch_runtime_entities() -> dict[str, list[str]]:
     return catalog
 
 
+def _fetch_runtime_scope_graph() -> list[dict[str, str]]:
+    if not runtime_entity_source_available():
+        return []
+
+    sql = """
+        WITH latest AS (
+            SELECT MAX(calmonth) AS calmonth
+            FROM wddm_dim_overview_cockpit_f
+        )
+        SELECT DISTINCT
+            TRIM(COALESCE(s.hotel_name_s, o.hotel_name)) AS hotel_name,
+            TRIM(COALESCE(s.area, o.from_area)) AS area,
+            TRIM(COALESCE(o.manage_corp, s.brand)) AS manage_corp,
+            TRIM(COALESCE(o.hotel_brand, s.brand_child)) AS brand_child,
+            TRIM(s.Builder) AS builder,
+            TRIM(s.brand_level) AS brand_level,
+            TRIM(s.city_level) AS city_level
+        FROM wddm_dim_overview_cockpit_f o
+        LEFT JOIN dim_allhotel_slcp s
+          ON s.hotel_name_f = o.hotel_name
+        JOIN latest l
+          ON o.calmonth = l.calmonth
+        WHERE TRIM(COALESCE(s.hotel_name_s, o.hotel_name)) <> ''
+    """
+    rows: list[dict[str, str]] = []
+    assert duckdb is not None
+    with duckdb.connect(str(DUCKDB_PATH), read_only=True) as conn:
+        try:
+            result = conn.execute(sql)
+        except Exception:
+            return []
+        columns = [str(item[0]) for item in (result.description or [])]
+        for raw_row in result.fetchall():
+            node: dict[str, str] = {}
+            for index, column in enumerate(columns):
+                value = raw_row[index] if index < len(raw_row) else None
+                node[column] = str(value).strip() if value is not None else ""
+            if node.get("hotel_name"):
+                rows.append(node)
+    return rows
+
+
 @lru_cache(maxsize=1)
 def load_entity_catalog() -> dict[str, list[str]]:
     if not ENTITY_CONFIG.exists():
@@ -279,6 +322,11 @@ def load_entity_catalog() -> dict[str, list[str]]:
     for entity_name, values in runtime_catalog.items():
         catalog.setdefault(entity_name, values)
     return catalog
+
+
+@lru_cache(maxsize=1)
+def load_scope_graph() -> list[dict[str, str]]:
+    return _fetch_runtime_scope_graph()
 
 
 def match_catalog_entities(question: str, entity_name: str) -> list[str]:
@@ -516,8 +564,111 @@ def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str,
     }
 
 
+def _matches_scope_value(node_value: str, requested_values: list[str]) -> bool:
+    if not requested_values:
+        return True
+    node_norm = normalize_text(node_value)
+    if not node_norm:
+        return False
+    for value in requested_values:
+        value_norm = normalize_text(str(value))
+        if value_norm and (value_norm == node_norm or value_norm in node_norm or node_norm in value_norm):
+            return True
+    return False
+
+
+def resolve_scope_collection(result: dict) -> dict[str, object] | None:
+    if result.get("requested_hotels"):
+        return None
+
+    graph = load_scope_graph()
+    if not graph:
+        return None
+
+    requested_areas = [str(item).strip() for item in result.get("requested_areas", []) if str(item).strip()]
+    requested_manage_corps = [str(item).strip() for item in result.get("requested_manage_corps", []) if str(item).strip()]
+    requested_brand_children = [str(item).strip() for item in result.get("requested_brand_children", []) if str(item).strip()]
+    requested_builders = [str(item).strip() for item in result.get("requested_builders", []) if str(item).strip()]
+    requested_brand_levels = [str(item).strip() for item in result.get("requested_brand_levels", []) if str(item).strip()]
+    requested_city_levels = [str(item).strip() for item in result.get("requested_city_levels", []) if str(item).strip()]
+
+    has_scope = any(
+        (
+            requested_areas,
+            requested_manage_corps,
+            requested_brand_children,
+            requested_builders,
+            requested_brand_levels,
+            requested_city_levels,
+        )
+    )
+    if not has_scope:
+        return None
+
+    members: list[str] = []
+    for node in graph:
+        if not _matches_scope_value(node.get("area", ""), requested_areas):
+            continue
+        if not _matches_scope_value(node.get("manage_corp", ""), requested_manage_corps):
+            continue
+        if not _matches_scope_value(node.get("brand_child", ""), requested_brand_children):
+            continue
+        if not _matches_scope_value(node.get("builder", ""), requested_builders):
+            continue
+        if not _matches_scope_value(node.get("brand_level", ""), requested_brand_levels):
+            continue
+        if not _matches_scope_value(node.get("city_level", ""), requested_city_levels):
+            continue
+        hotel_name = str(node.get("hotel_name") or "").strip()
+        if hotel_name and hotel_name not in members:
+            members.append(hotel_name)
+
+    if not members:
+        return None
+
+    scope_parts: list[str] = []
+    if requested_areas:
+        scope_parts.extend(requested_areas)
+    if requested_manage_corps:
+        scope_parts.extend(requested_manage_corps)
+    if requested_brand_children:
+        scope_parts.extend(requested_brand_children)
+    if requested_builders:
+        scope_parts.extend(requested_builders)
+    if requested_brand_levels:
+        scope_parts.extend(requested_brand_levels)
+    if requested_city_levels:
+        scope_parts.extend(requested_city_levels)
+
+    if requested_areas:
+        scope_type = "area_scope"
+    elif requested_manage_corps:
+        scope_type = "manage_corp_scope"
+    elif requested_brand_children:
+        scope_type = "brand_scope"
+    else:
+        scope_type = "filtered_scope"
+
+    return {
+        "scope_type": scope_type,
+        "label": " / ".join(scope_parts) or "当前范围酒店集合",
+        "member_hotels": members,
+        "member_count": len(members),
+        "resolution_basis": "runtime_scope_graph",
+        "applied_filters": {
+            "areas": requested_areas,
+            "manage_corps": requested_manage_corps,
+            "brand_children": requested_brand_children,
+            "builders": requested_builders,
+            "brand_levels": requested_brand_levels,
+            "city_levels": requested_city_levels,
+        },
+    }
+
+
 def build_resolved_entities(question: str, result: dict) -> dict[str, object]:
     hotel_group = resolve_hotel_group(question, result)
+    scope_collection = resolve_scope_collection(result)
     return {
         "hotels": list(result.get("requested_hotels", [])),
         "areas": list(result.get("requested_areas", [])),
@@ -529,6 +680,7 @@ def build_resolved_entities(question: str, result: dict) -> dict[str, object]:
         "departments": list(result.get("requested_departments", [])),
         "accounts": list(result.get("requested_accounts", [])),
         "hotel_group": hotel_group,
+        "scope_collection": scope_collection,
     }
 
 
@@ -540,8 +692,9 @@ def is_portfolio_question(question_norm: str) -> bool:
 
 def build_query_plan(question: str, result: dict) -> dict[str, object]:
     question_norm = normalize_text(question)
-    resolved_entities = build_resolved_entities(question, result)
+    resolved_entities = result.get("resolved_entities") if isinstance(result.get("resolved_entities"), dict) else build_resolved_entities(question, result)
     hotel_group = resolved_entities.get("hotel_group") if isinstance(resolved_entities.get("hotel_group"), dict) else None
+    scope_collection = resolved_entities.get("scope_collection") if isinstance(resolved_entities.get("scope_collection"), dict) else None
     areas = list(result.get("requested_areas", []))
     hotels = list(result.get("requested_hotels", []))
     manage_corps = list(result.get("requested_manage_corps", []))
@@ -555,6 +708,10 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         object_type = "hotel_group"
         object_label = str(hotel_group.get("label") or "酒店集合")
         query_grain = "portfolio"
+    elif scope_collection and (portfolio_like or int(scope_collection.get("member_count") or 0) > 1):
+        object_type = str(scope_collection.get("scope_type") or "filtered_scope")
+        object_label = str(scope_collection.get("label") or "当前范围酒店集合")
+        query_grain = "portfolio" if metric_code != "OPERATING_HOTEL_COUNT" else "scope_stat"
     elif len(hotels) == 1 and not portfolio_like:
         object_type = "single_hotel"
         object_label = hotels[0]
@@ -576,7 +733,11 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         object_label = "当前管理范围"
         query_grain = "comparison" if intent in {"query", "rank"} else "portfolio"
 
-    if intent == "explain":
+    if metric_code == "OPERATING_HOTEL_COUNT":
+        analysis_mode = "scope_stat_snapshot"
+        themes = [metric_name, "scope_inventory"]
+        execution_order = ["resolve_scope", "count_entities", "compose_stat"]
+    elif intent == "explain":
         analysis_mode = "driver_analysis"
         themes = ["driver_breakdown", "pnl_drilldown"]
         execution_order = ["resolve_scope", "query_detail", "identify_drivers", "compose_explanation"]
@@ -604,7 +765,13 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         "analysis_mode": analysis_mode,
         "themes": themes,
         "execution_order": execution_order,
-        "resolved_hotel_count": len(hotel_group.get("member_hotels", [])) if hotel_group else len(hotels),
+        "resolved_hotel_count": (
+            len(hotel_group.get("member_hotels", []))
+            if hotel_group
+            else int(scope_collection.get("member_count") or 0)
+            if scope_collection
+            else len(hotels)
+        ),
     }
 
 
@@ -755,6 +922,8 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
     time_scope = normalize_time_scope(payload.time_scope, defaults, warnings, payload.question)
     period_type = str(skill_defaults.get("period_type") or defaults.get("period_type", "MTD")).strip() or "MTD"
     scope = extract_scope(payload.question)
+    if metric_code == "OPERATING_HOTEL_COUNT":
+        scope["requested_hotels"] = []
 
     confidence = 0.55
     if matched_metric_term:

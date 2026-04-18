@@ -43,7 +43,7 @@ cases:
     time_scope: "202601"
     expected:
       skill_id: hotel_operation_overview
-      metric_code: OPERATING_PROFIT
+      metric_code: OWNER_PROFIT
       compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
@@ -52,8 +52,8 @@ cases:
     sql_assertions:
       contains:
         - wddm_dim_overview_cockpit_f
-        - OPERATING_PROFIT_MTD_A
-        - OPERATING_PROFIT_MTD_B
+        - OWNER_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_L
         - TOTAL_INCOME_MTD_A
         - OCCUPANCY_RATE_MTD_A
         - PEOPLE_COST_MTD_A
@@ -64,7 +64,7 @@ cases:
     time_scope: "202601"
     expected:
       skill_id: hotel_operation_overview
-      metric_code: OPERATING_PROFIT
+      metric_code: OWNER_PROFIT
       compare_mode: yoy
       time_scope: "202601"
       requested_hotels:
@@ -74,7 +74,7 @@ cases:
       contains:
         - wddm_dim_overview_cockpit_f
         - CONCAT_WS
-        - OPERATING_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_A
         - TOTAL_INCOME_MTD_A
         - ROOM_INCOME_MTD_A
         - OCCUPANCY_RATE_MTD_A
@@ -88,10 +88,10 @@ cases:
         brand_child: 万豪
         brand_level: 标准五星级
         city_level: 一线城市
-        actual_value: 4204313.0
-        compare_value: 2861988.0
-        diff_value: 1342325.0
-        diff_rate: 0.469
+        actual_value: 3095227.5
+        compare_value: 2132912.0
+        diff_value: 962315.5
+        diff_rate: 0.4512
         total_income_actual: 12642100.0
         total_income_budget: 11462572.0
         total_income_last_year: 12856260.0
@@ -133,7 +133,8 @@ cases:
         - 客房收入
         - ADR
         - RevPAR
-        - 经营利润率
+        - NOP率
+        - GOP率
         - 人工成本
         - 华北区
       not_mention:
@@ -180,7 +181,7 @@ cases:
     time_scope: "202601"
     expected:
       skill_id: hotel_profit_overview
-      metric_code: OPERATING_PROFIT
+      metric_code: OWNER_PROFIT
       compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
@@ -188,8 +189,8 @@ cases:
       requested_areas: []
     sql_assertions:
       contains:
-        - OPERATING_PROFIT_MTD_A
-        - OPERATING_PROFIT_MTD_B
+        - OWNER_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_L
         - 江门嘉华
 
   - id: profit_under_budget_direction
@@ -207,3 +208,124 @@ cases:
       contains:
         - OPERATING_PROFIT_MTD_A < o.OPERATING_PROFIT_MTD_B
         - ORDER BY (o.OPERATING_PROFIT_MTD_A - o.OPERATING_PROFIT_MTD_B) ASC
+
+  - id: portfolio_area_brand_filtered_overview
+    question: 请看一下华南区嘉华品牌酒店3月份的经营情况
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_operation_overview
+      metric_code: OWNER_PROFIT
+      compare_mode: yoy
+      time_scope: "202603"
+      requested_hotels: []
+      requested_areas:
+        - 华南区
+      requested_brand_children:
+        - 嘉华
+    sql_assertions:
+      contains:
+        - OWNER_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_L
+        - s.area IN ('华南区')
+        - 嘉华
+  - id: dimension_brand_area_month_grouped_overview
+    question: 请按品牌汇总看一下华南区3月份经营情况
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_operation_overview
+      metric_code: OWNER_PROFIT
+      compare_mode: yoy
+      time_scope: "202603"
+      requested_hotels: []
+      requested_areas:
+        - 华南区
+    sql_assertions:
+      contains:
+        - OWNER_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_L
+        - s.area IN ('华南区')
+
+  - id: company_manage_area_grouped_overview
+    question: 请分析一下公司所有酒店3月份的经营情况，请汇总到管理公司和区域维度输出
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_operation_overview
+      metric_code: OWNER_PROFIT
+      compare_mode: yoy
+      time_scope: "202603"
+      requested_hotels: []
+      requested_areas: []
+      requested_manage_corps: []
+    expected_paths:
+      query_plan.query_object_type: hotel_group
+      query_plan.query_object_label: 公司全部酒店
+      query_plan.query_grain: portfolio
+      query_plan.analysis_mode: group_by_dimension_report
+      query_plan.group_by_dimensions:
+        - manage_corp
+        - area
+        - manage_corp_area
+      query_plan.metric_bundle_code: group_dimension_overview
+      query_plan.report_template_code: executive_group_dimension
+    sql_assertions:
+      contains:
+        - 公司全部酒店
+        - OWNER_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_L
+        - TOTAL_INCOME_MTD_A
+        - OCCUPANCY_RATE_MTD_A
+
+  - id: manage_corp_alias_area_grouped_overview
+    question: 请分析一下万达所有酒店3月份经营情况，按区域维度输出
+    time_scope: "202601"
+    expected:
+      skill_id: hotel_operation_overview
+      metric_code: OWNER_PROFIT
+      compare_mode: yoy
+      time_scope: "202603"
+      requested_hotels: []
+      requested_areas: []
+      requested_manage_corps:
+        - 万达品牌
+    expected_paths:
+      query_plan.query_object_type: manage_corp_scope
+      query_plan.query_grain: portfolio
+      query_plan.analysis_mode: group_by_dimension_report
+      query_plan.group_by_dimensions:
+        - area
+      query_plan.metric_bundle_code: group_dimension_overview
+    sql_assertions:
+      contains:
+        - 万达品牌
+        - OWNER_PROFIT_MTD_A
+        - OWNER_PROFIT_MTD_L
+
+  - id: follow_up_compare_shift_to_yoy
+    question: 经营利润换成同比，看一下
+    time_scope: "202603"
+    expected:
+      metric_code: OPERATING_PROFIT
+      compare_mode: yoy
+      follow_up_mode: compare_shift
+      time_scope: "202603"
+    sql_assertions:
+      contains:
+        - OWNER_PROFIT_MTD_A
+
+  - id: pnl_hierarchy_subject_drilldown
+    question: 请解释一下江门嘉华餐饮部酒水成本的经营利润科目上下级关系
+    time_scope: "202601"
+    expected:
+      intent: explain
+      metric_code: OPERATING_PROFIT
+      compare_mode: yoy
+      requested_hotels:
+        - 江门嘉华
+      requested_departments:
+        - 餐饮部
+      requested_accounts:
+        - 酒水成本
+    sql_assertions:
+      contains:
+        - Dept
+        - 酒水成本

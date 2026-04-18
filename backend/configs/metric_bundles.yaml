@@ -1,0 +1,206 @@
+bundles:
+  operation_overview:
+    name: 经营总览指标包
+    description: 管理层默认经营观察口径，覆盖收入、客房效率、利润质量、成本效率。
+    primary_metric: OWNER_PROFIT
+    metrics:
+      - OWNER_PROFIT
+      - OPERATING_PROFIT
+      - TOTAL_INCOME
+      - ROOM_INCOME
+      - RESTAURANT_INCOME
+      - BANQUET_INCOME
+      - ADR
+      - OCCUPANCY_RATE
+      - REVPAR
+      - PEOPLE_COST
+      - ENERGY_EXPENSES
+      - RESTAURANT_COST
+    themes:
+      - income_quality
+      - room_efficiency
+      - profit_quality
+      - cost_efficiency
+      - internal_benchmark
+    focus_profiles:
+      management_report:
+        summary_lead: 本次按管理层摘要整理，先看整体，再下钻结构、利润和成本，尽量不先下结论。
+        follow_up_prompts:
+          - 继续看重点酒店和梯队。
+          - 切换到去年同期，对比变化是基数问题还是结构问题。
+          - 继续下钻收入、利润或成本科目。
+      portfolio_overview:
+        summary_lead: 本次按组合视角观察，先看整体，再看结构、利润和成本，最后再决定是否继续下钻。
+        follow_up_prompts:
+          - 继续看重点酒店。
+          - 切换到管理公司维度。
+          - 只看华南区。
+      driver_analysis:
+        summary_lead: 本次围绕结果差异继续展开原因，先看驱动项，再判断变化来自收入、利润还是成本。
+        follow_up_prompts:
+          - 继续展开原因。
+          - 只看华南区。
+          - 切换到去年同期。
+      yoy_change:
+        summary_lead: 本次切到去年同期观察，先确认变化方向，再拆是基数变化、结构变化还是成本变化。
+        follow_up_prompts:
+          - 继续看去年同期对比。
+          - 切换到预算对比。
+          - 下钻到单店原因。
+      scope_refinement:
+        summary_lead: 本次只是收窄观察范围，先确认口径一致，再继续看变化。
+        follow_up_prompts:
+          - 继续收窄到单店。
+          - 切换到品牌。
+          - 改成去年同期。
+      scope_inventory:
+        summary_lead: 本次只核对在营酒店数量，不对经营优劣做判断。
+        follow_up_prompts:
+          - 继续看各区域在营数量。
+          - 切换到品牌维度。
+          - 看去年同期在营数量。
+
+  group_dimension_overview:
+    name: 组合分维度指标包
+    description: 适用于集团、区域、品牌组合经营观察，突出维度对比和经营质量。
+    primary_metric: OWNER_PROFIT
+    metrics:
+      - OWNER_PROFIT
+      - OPERATING_PROFIT
+      - TOTAL_INCOME
+      - ROOM_INCOME
+      - RESTAURANT_INCOME
+      - BANQUET_INCOME
+      - ADR
+      - OCCUPANCY_RATE
+      - REVPAR
+      - PEOPLE_COST
+      - ENERGY_EXPENSES
+      - RESTAURANT_COST
+    themes:
+      - income_quality
+      - room_efficiency
+      - profit_quality
+      - cost_efficiency
+      - dimension_comparison
+    focus_profiles:
+      management_report:
+        summary_lead: 本次按管理层摘要整理，先把维度位置、结构变化和经营质量放到同一张视图里。
+        follow_up_prompts:
+          - 继续看管理公司对比。
+          - 只看华南区。
+          - 切换到品牌维度。
+      dimension_comparison:
+        summary_lead: 本次按维度比较，先看管理公司、区域、品牌的相对位置，再拆收入、利润和成本。
+        follow_up_prompts:
+          - 继续看管理公司对比。
+          - 只看华南区。
+          - 切换到品牌维度。
+      driver_analysis:
+        summary_lead: 本次围绕维度差异继续展开原因，先看哪个维度拉动或拖累，再判断收入、利润还是成本在起作用。
+        follow_up_prompts:
+          - 继续展开原因。
+          - 只看华南区。
+          - 切换到去年同期。
+      yoy_change:
+        summary_lead: 本次切到去年同期维度观察，先确认变化是否来自单店、区域或品牌结构。
+        follow_up_prompts:
+          - 继续看去年同期对比。
+          - 切换到预算对比。
+          - 下钻到重点酒店。
+
+  income_overview:
+    name: 收入总览指标包
+    description: 单店或组合收入观察，同时保留效率、利润和成本的基础支撑指标。
+    primary_metric: TOTAL_INCOME
+    metrics:
+      - TOTAL_INCOME
+      - ROOM_INCOME
+      - RESTAURANT_INCOME
+      - BANQUET_INCOME
+      - ADR
+      - OCCUPANCY_RATE
+      - REVPAR
+      - OWNER_PROFIT
+      - OPERATING_PROFIT
+      - PEOPLE_COST
+    themes:
+      - income_quality
+      - room_efficiency
+      - profit_quality
+      - internal_benchmark
+    focus_profiles:
+      income_structure:
+        summary_lead: 本次先拆收入结构，不先判断好坏，先看总收入、客房收入、餐饮/宴会收入及其占比。
+        follow_up_prompts:
+          - 继续看客房收入。
+          - 只看餐饮/宴会收入。
+          - 切换到收入同比变化。
+      yoy_change:
+        summary_lead: 本次切到去年同期观察，先确认收入变化，再拆是基数变化、结构变化还是客群变化。
+        follow_up_prompts:
+          - 继续看去年同期收入变化。
+          - 切换到预算对比。
+          - 只看华南区。
+      management_report:
+        summary_lead: 本次按经营摘要整理，先看收入质量，再结合客房效率、利润和成本一起判断。
+        follow_up_prompts:
+          - 继续看利润质量。
+          - 继续看客房效率。
+          - 只看华南区。
+
+  hotel_snapshot:
+    name: 单店经营快照指标包
+    description: 单店快照口径，兼顾收入结构、客房效率、利润质量和成本效率。
+    primary_metric: OWNER_PROFIT
+    metrics:
+      - OWNER_PROFIT
+      - OPERATING_PROFIT
+      - TOTAL_INCOME
+      - ROOM_INCOME
+      - RESTAURANT_INCOME
+      - BANQUET_INCOME
+      - ADR
+      - OCCUPANCY_RATE
+      - REVPAR
+      - PEOPLE_COST
+      - ENERGY_EXPENSES
+      - RESTAURANT_COST
+    themes:
+      - metric_snapshot
+      - income_quality
+      - room_efficiency
+      - profit_quality
+      - cost_efficiency
+      - internal_benchmark
+    focus_profiles:
+      income_structure:
+        summary_lead: 本次先拆收入结构，不先下判断，先看总收入、客房收入、餐饮/宴会收入及其占比。
+        follow_up_prompts:
+          - 继续看客房收入。
+          - 只看餐饮/宴会收入。
+          - 切换到收入同比变化。
+      profit_cost_efficiency:
+        summary_lead: 本次把利润与成本放在一起看，先判断收入改善有没有转成利润，再看成本是否抵消收益。
+        follow_up_prompts:
+          - 继续看人工成本。
+          - 只看能耗和餐饮成本。
+          - 切换到利润同比变化。
+      driver_analysis:
+        summary_lead: 本次围绕单店波动继续展开原因，先看驱动项，再判断变化来自收入、利润还是成本。
+        follow_up_prompts:
+          - 继续展开原因。
+          - 只看华南区。
+          - 切换到去年同期。
+      yoy_change:
+        summary_lead: 本次切到去年同期观察，先确认变化方向，再拆是基数变化、结构变化还是成本变化。
+        follow_up_prompts:
+          - 继续看去年同期对比。
+          - 切换到预算对比。
+          - 只看华南区。
+      scope_refinement:
+        summary_lead: 本次只是收窄到单店范围，先确保口径一致，再继续看变化。
+        follow_up_prompts:
+          - 继续展开原因。
+          - 切换到去年同期。
+          - 只看华南区。

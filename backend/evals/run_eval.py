@@ -56,6 +56,27 @@ def assert_expected(case: dict[str, Any], parsed: dict[str, Any]) -> list[str]:
     return failures
 
 
+def value_at_path(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def assert_expected_paths(case: dict[str, Any], parsed: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    expected = case.get("expected_paths", {})
+    if not isinstance(expected, dict):
+        return failures
+    for path, expected_value in expected.items():
+        actual_value = value_at_path(parsed, str(path))
+        if normalize(actual_value) != normalize(expected_value):
+            failures.append(f"expected parsed.{path}={expected_value!r}, got {actual_value!r}")
+    return failures
+
+
 def assert_sql(case: dict[str, Any], sql: str) -> list[str]:
     failures: list[str] = []
     assertions = case.get("sql_assertions", {})
@@ -133,6 +154,15 @@ def build_sql_for_case(ai_query_main, metric_main, parsed: dict[str, Any]) -> st
             requested_hotels=parsed.get("requested_hotels", []),
             requested_areas=parsed.get("requested_areas", []),
         )
+    query_route = ai_query_main._query_route(parsed)
+    if query_route.startswith("portfolio"):
+        return ai_query_main.build_portfolio_sql(
+            metric_def,
+            parsed,
+            allowed_hotels=["ALL"],
+            requested_hotels=ai_query_main.effective_requested_hotels(parsed),
+            requested_areas=parsed.get("requested_areas", []),
+        )
     return ai_query_main.build_sql(
         metric_def,
         parsed,
@@ -178,6 +208,7 @@ def run_eval(cases_path: Path) -> tuple[int, list[dict[str, Any]]]:
             with patch.object(semantic_main, "call_llm_parse", return_value=None):
                 parsed = semantic_main.parse(semantic_main.Req(question=question, time_scope=time_scope))
             failures.extend(assert_expected(case, parsed))
+            failures.extend(assert_expected_paths(case, parsed))
             sql = build_sql_for_case(ai_query_main, metric_main, parsed)
             failures.extend(assert_sql(case, sql))
             if isinstance(case.get("answer_assertions"), dict):

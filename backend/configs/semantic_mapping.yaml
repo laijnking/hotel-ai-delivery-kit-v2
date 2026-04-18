@@ -1,10 +1,18 @@
 synonyms:
   经营利润: OPERATING_PROFIT
-  经营情况: OPERATING_PROFIT
-  经营状况: OPERATING_PROFIT
-  经营表现: OPERATING_PROFIT
+  经营情况: OWNER_PROFIT
+  经营状况: OWNER_PROFIT
+  经营表现: OWNER_PROFIT
   GOP: OPERATING_PROFIT
-  利润: OPERATING_PROFIT
+  业主利润: OWNER_PROFIT
+  业主净利润: OWNER_PROFIT
+  经营净利润: OWNER_PROFIT
+  经营摘要: OWNER_PROFIT
+  经营总览: OWNER_PROFIT
+  管理摘要: OWNER_PROFIT
+  NOP: OWNER_PROFIT
+  nop: OWNER_PROFIT
+  利润: OWNER_PROFIT
   operating profit: OPERATING_PROFIT
   总收入: TOTAL_INCOME
   收入: TOTAL_INCOME
@@ -42,6 +50,13 @@ intents:
   摘要: report
   报告: report
   晨报: report
+  继续展开原因: explain
+  展开原因: explain
+  继续展开: explain
+  只看: query
+  切到: query
+  改看: query
+  换成: query
 
 compare_keywords:
   budget:
@@ -51,14 +66,101 @@ compare_keywords:
     - 预算差异
     - 达成率
     - 目标
+    - 换成预算
+    - 改成预算
+    - 切成预算
+    - 切换到预算
   yoy:
     - 同比
     - 去年同期
     - 去年
+    - 同比变化
+    - 换成同比
+    - 改成同比
+    - 切成同比
+    - 切换到同比
   actual:
     - 实际
     - 当前
     - 本月
+    - 换成实际
+    - 改成实际
+
+dimension_aliases:
+  manage_corp:
+    - 管理公司
+    - 管理方
+    - 管理集团
+    - 管理口径
+    - 管理公司维度
+    - 管理公司汇总
+  brand:
+    - 品牌
+    - 品牌维度
+    - 品牌汇总
+    - 品牌口径
+    - 品牌层
+  brand_child:
+    - 子品牌
+    - 子品牌维度
+    - 子品牌汇总
+    - 子品牌口径
+    - 细分品牌
+  area:
+    - 区域
+    - 大区
+    - 区域维度
+    - 区域汇总
+  hotel:
+    - 酒店
+    - 单店
+    - 门店
+    - 酒店维度
+    - 酒店汇总
+  month:
+    - 月份
+    - 月份维度
+    - 时间
+    - 时间维度
+    - 本月
+    - 去年同期
+    - 同比
+  subject_hierarchy:
+    - 科目
+    - 科目层级
+    - 科目上下级
+    - 科目树
+    - 科目维度
+    - 部门
+    - 部门层级
+    - 账目
+    - PnL
+
+follow_up_aliases:
+  driver:
+    - 原因
+    - 为什么
+    - 解释
+    - 归因
+    - 展开原因
+  refine_scope:
+    - 只看
+    - 仅看
+    - 切到
+    - 改看
+    - 切换到
+  compare_shift:
+    - 换成同比
+    - 改成同比
+    - 切成同比
+    - 换成预算
+    - 改成预算
+    - 切成预算
+  continue:
+    - 继续
+    - 展开
+    - 追问
+    - 再看
 
 defaults:
   time_scope: "202601"

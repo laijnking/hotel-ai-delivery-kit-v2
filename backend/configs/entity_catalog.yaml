@@ -24,3 +24,8 @@ entities:
   city:
     source: C:/Project/HotelAgent/basedata/城市数据.txt
     header_prefix: cities城市名称包括：
+
+aliases:
+  manage_corp:
+    万达品牌:
+      - 万达

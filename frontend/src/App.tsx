@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { fetchSystemSettings, submitQuery, submitReport } from "./lib/api";
-import { QuickQuestions } from "./components/QuickQuestions";
 
 type QueryStatus = "idle" | "loading" | "success" | "error";
 type Role = "GROUP_ADMIN" | "AREA_MANAGER" | "HOTEL_MANAGER";
 type ActionMode = "query" | "report";
+type ViewMode = "management" | "debug";
 
 type Message = {
   id: number;
@@ -23,6 +23,8 @@ type ConversationContext = {
   lastTimeScope: string | null;
   lastScopeLabel: string | null;
   lastCompareMode: string | null;
+  lastAnalysisMode?: string | null;
+  lastAnalysisFocus?: string | null;
   lastSummary: string | null;
 };
 
@@ -52,6 +54,38 @@ type QuestionFrame = {
 
 type AnalysisFocus = "driver_analysis" | "management_report" | "yoy_change" | "income_structure" | "profit_cost_efficiency" | null;
 
+type PromptGroup = {
+  title: string;
+  description: string;
+  items: string[];
+};
+
+type TraceEvent = {
+  stage?: string;
+  status?: string;
+  duration_ms?: number;
+  metadata?: Record<string, any>;
+};
+
+type SectionMetricRow = {
+  rank: number | null;
+  dimension: string;
+  metric: string;
+  value: string;
+};
+
+type SectionMetricGroup = {
+  metric: string;
+  rows: SectionMetricRow[];
+};
+
+type SectionTierRow = {
+  tier: string;
+  count: string;
+  metric: string;
+  value: string;
+};
+
 const ROLE_OPTIONS: Array<{ value: Role; label: string }> = [
   { value: "GROUP_ADMIN", label: "集团管理层" },
   { value: "AREA_MANAGER", label: "区域经理" },
@@ -63,10 +97,15 @@ const ACTION_OPTIONS: Array<{ value: ActionMode; label: string }> = [
   { value: "report", label: "报告" }
 ];
 
+const VIEW_MODE_OPTIONS: Array<{ value: ViewMode; label: string; helper: string }> = [
+  { value: "management", label: "管理层视图", helper: "只保留结论、分维度汇总、重点酒店和追问入口。" },
+  { value: "debug", label: "调试视图", helper: "显示 Trace、SQL、权限范围、结构化数据和系统配置。" }
+];
+
 const DEFAULT_QUESTION = "本月哪些酒店经营利润未达预算？";
 const DEFAULT_ROLE: Role = "GROUP_ADMIN";
 const ROLE_STORAGE_KEY = "hotel-ai-role";
-const BASE_FOLLOW_UP_SUGGESTIONS = ["继续展开原因", "换成经营摘要", "看同比变化", "分析收入结构", "看利润和成本效率"];
+const BASE_FOLLOW_UP_SUGGESTIONS = ["继续展开原因", "换成经营摘要", "看去年同期", "看收入结构", "看利润和成本效率"];
 const FALLBACK_QUICK_QUESTIONS = [
   "本月哪些酒店经营利润未达预算？",
   "广州丽思卡尔顿酒店3月的收入情况怎么样？",
@@ -83,6 +122,7 @@ const SECTION_TITLE_ANALYSIS = "\u5206\u5c42\u5206\u6790";
 const SECTION_TITLES_MANAGEMENT_ORDER = [
   "\u5206\u6790\u8303\u56f4",
   "\u7ecf\u8425\u603b\u89c8",
+  "\u7ba1\u7406\u516c\u53f8/\u533a\u57df\u6c47\u603b",
   "\u6536\u5165\u8d28\u91cf",
   "\u5ba2\u623f\u6548\u7387",
   "\u5229\u6da6\u8d28\u91cf",
@@ -174,6 +214,59 @@ function getContextSnapshotItems(context: ConversationContext) {
   ].filter(Boolean) as string[];
 }
 
+function dedupePromptItems(items: Array<string | null | undefined>) {
+  return Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+function getStarterPromptGroups(context: ConversationContext, quickQuestions: string[]): PromptGroup[] {
+  const starterQuestions = dedupePromptItems((quickQuestions?.length ? quickQuestions : FALLBACK_QUICK_QUESTIONS).slice(0, 4));
+  const quickFilters = dedupePromptItems([
+    context.lastArea ? `只看${context.lastArea}` : "只看华南区",
+    context.lastHotel ? `只看${context.lastHotel}` : null,
+    "看去年同期",
+    context.lastCompareMode === "yoy" ? "换成预算对比" : "切到去年同期",
+    "换成经营摘要"
+  ]);
+  return [
+    {
+      title: "常用切入",
+      description: "直接点一下，就能开始经营对话。",
+      items: starterQuestions,
+    },
+    {
+      title: "快速筛选",
+      description: "缩小范围后再看重点变化。",
+      items: quickFilters,
+    },
+  ];
+}
+
+function getFollowUpPromptGroups(context: ConversationContext, suggestions: string[]): PromptGroup[] {
+  const followUpFocus = dedupePromptItems([
+    ...suggestions.slice(0, 4),
+    context.lastAnalysisFocus !== "income_structure" ? "看收入结构" : null,
+    context.lastAnalysisFocus !== "profit_cost_efficiency" ? "看利润和成本效率" : null,
+  ]);
+  const followUpFilters = dedupePromptItems([
+    context.lastArea ? `只看${context.lastArea}` : "只看华南区",
+    context.lastHotel ? `只看${context.lastHotel}` : null,
+    context.lastCompareMode !== "yoy" ? "看去年同期" : "换成预算对比",
+    context.lastAnalysisMode !== "management_report" ? "换成经营摘要" : null,
+  ]);
+  return [
+    {
+      title: "继续聊",
+      description: "顺着当前结论继续展开。",
+      items: followUpFocus,
+    },
+    {
+      title: "换个切法",
+      description: "换区域、换口径、换时间再看一遍。",
+      items: followUpFilters,
+    },
+  ];
+}
+
 function restoreConversations(): Conversation[] {
   if (typeof window === "undefined") return [createConversation()];
   try {
@@ -203,6 +296,45 @@ function formatJson(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+function getTraceStageLabel(stage: unknown) {
+  const value = String(stage || "");
+  const labels: Record<string, string> = {
+    parse_intent: "语义理解",
+    sql_guardrail: "口径安全检查",
+    execute_sql: "数据读取",
+    build_analysis_blocks: "分析拆解",
+    build_narrative_brief: "叙事生成",
+    pipeline_warnings: "系统提示"
+  };
+  return labels[value] || value || "未知阶段";
+}
+
+function getTraceStatusLabel(status: unknown) {
+  const value = String(status || "");
+  const labels: Record<string, string> = {
+    completed: "完成",
+    passed: "通过",
+    warning: "提醒",
+    blocked: "阻断",
+    fallback: "降级",
+    failed: "失败"
+  };
+  return labels[value] || value || "待确认";
+}
+
+function getTraceEventNote(event: TraceEvent) {
+  const metadata = event.metadata || {};
+  const guardrailStatus = metadata.guardrail_status;
+  const pieces = [
+    typeof event.duration_ms === "number" ? `${event.duration_ms}ms` : null,
+    guardrailStatus ? `Guardrail：${guardrailStatus}` : null,
+    metadata.agent ? `Agent：${metadata.agent}` : null,
+    typeof metadata.row_count === "number" ? `数据：${metadata.row_count} 条` : null,
+    metadata.metric_code ? `指标：${metadata.metric_code}` : null
+  ].filter(Boolean);
+  return pieces.join(" · ");
+}
+
 function formatNumber(value: unknown) {
   if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
   return value.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
@@ -211,6 +343,72 @@ function formatNumber(value: unknown) {
 function formatPercent(value: unknown) {
   if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function parseDisplayNumber(value: string) {
+  const numeric = Number(value.replace(/,/g, "").replace(/%$/, ""));
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+const SECTION_METRIC_LABELS = [
+  "NOP业主净利润",
+  "餐饮/宴会收入",
+  "经营利润",
+  "人工成本",
+  "客房收入",
+  "总收入",
+  "RevPAR",
+  "GOP",
+  "差额",
+  "利润率",
+  "成本率",
+  "入住率",
+].sort((left, right) => right.length - left.length);
+
+const SECTION_METRIC_PATTERN = new RegExp(
+  `^(?:(\\d+)[\\.、]\\s*)?(.+?)\\s+(${SECTION_METRIC_LABELS.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s+(-?[\\d,]+(?:\\.\\d+)?%?)$`,
+);
+
+function parseSectionMetricGroups(content: unknown): SectionMetricGroup[] {
+  const text = String(content || "").trim();
+  if (!text) return [];
+  const groups = new Map<string, SectionMetricRow[]>();
+  text
+    .split(/[；。\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((segment) => {
+      const match = segment.match(SECTION_METRIC_PATTERN);
+      if (!match) return;
+      const [, rank, dimension, metric, value] = match;
+      const rows = groups.get(metric) || [];
+      rows.push({
+        rank: rank ? Number(rank) : rows.length + 1,
+        dimension: dimension.trim(),
+        metric,
+        value,
+      });
+      groups.set(metric, rows);
+    });
+  return Array.from(groups.entries())
+    .map(([metric, rows]) => ({ metric, rows }))
+    .filter((group) => group.rows.length >= 2);
+}
+
+function parseSectionTierRows(content: unknown): SectionTierRow[] {
+  const text = String(content || "").trim();
+  if (!text) return [];
+  return text
+    .split(/[；。\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      const match = segment.match(/^(.+?)\s+(\d+)\s+家，?合计\s+(.+?)\s+(-?[\d,]+(?:\.\d+)?%?)$/);
+      if (!match) return null;
+      const [, tier, count, metric, value] = match;
+      return { tier, count, metric, value };
+    })
+    .filter(Boolean) as SectionTierRow[];
 }
 
 function formatTimeScopeLabel(value: unknown) {
@@ -276,6 +474,40 @@ function getHighlights(result: any) {
   return [];
 }
 
+function getAnalysisBlocks(result: any) {
+  const sources = [
+    result?.analysis_blocks,
+    result?.explanation?.analysis_blocks,
+    result?.report?.analysis_blocks,
+  ];
+  for (const source of sources) {
+    if (Array.isArray(source) && source.length) {
+      return source.filter((item) => item && typeof item === "object");
+    }
+    if (source && typeof source === "object") {
+      const nested = source.blocks || source.items || source.list;
+      if (Array.isArray(nested) && nested.length) {
+        return nested.filter((item) => item && typeof item === "object");
+      }
+    }
+  }
+  return [];
+}
+
+function getNarrativeBrief(result: any) {
+  const value =
+    result?.narrative_brief ||
+    result?.explanation?.narrative_brief ||
+    result?.report?.narrative_brief ||
+    result?.briefing ||
+    null;
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  return typeof value === "number" ? String(value) : null;
+}
+
 function getPrimarySections(result: any) {
   if (Array.isArray(result?.report_sections) && result.report_sections.length) {
     return result.report_sections;
@@ -299,6 +531,190 @@ function getExecutiveSummaryLine(result: any) {
   const risk = sections.find((item: any) => item.title === "\u98ce\u9669");
   if (!conclusion && !risk) return null;
   return [conclusion?.content, risk?.content].filter(Boolean).join(" ");
+}
+
+function normalizeAnalysisText(value: unknown) {
+  return String(value || "").replace(/\s+/g, "").toLowerCase();
+}
+
+function getAnalysisBlockTitle(block: any, index: number) {
+  const title = block?.title || block?.name || block?.label || block?.heading;
+  if (typeof title === "string" && title.trim()) return title.trim();
+  return `分析块 ${index + 1}`;
+}
+
+function getAnalysisBlockNarrative(block: any) {
+  const candidates = [
+    block?.narrative,
+    block?.brief,
+    block?.summary,
+    block?.content,
+    block?.description,
+    block?.lead,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return "";
+}
+
+function getAnalysisBlockTags(block: any) {
+  const raw = block?.tags || block?.metrics || block?.metrics_used || block?.highlights || block?.points || block?.items;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item: any) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const label = item.label || item.name || item.title || item.key;
+        const value = item.value ?? item.amount ?? item.text;
+        if (label && value != null && String(value).trim()) {
+          return `${String(label).trim()}：${String(value).trim()}`;
+        }
+        if (label) return String(label).trim();
+        if (value != null) return String(value).trim();
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function getAnalysisBlockStatus(block: any) {
+  const status = String(block?.data_status || block?.status || "").trim();
+  if (status === "available") return { label: "数据完整", tone: "ok" };
+  if (status === "partial") return { label: "部分数据", tone: "warn" };
+  if (status === "missing") return { label: "缺少数据", tone: "danger" };
+  return null;
+}
+
+function getAnalysisBlockEvidence(block: any) {
+  const fields = Array.isArray(block?.evidence_fields)
+    ? block.evidence_fields.map((item: any) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const metrics = Array.isArray(block?.metrics_used)
+    ? block.metrics_used.map((item: any) => String(item || "").trim()).filter(Boolean)
+    : [];
+  return {
+    fields: fields.slice(0, 8),
+    metrics: metrics.slice(0, 8),
+  };
+}
+
+function getAnalysisBlockSignatures(blocks: any[]) {
+  const signatures = new Set<string>();
+  blocks.forEach((block, index) => {
+    const title = getAnalysisBlockTitle(block, index);
+    signatures.add(normalizeAnalysisText(title));
+    const narrative = getAnalysisBlockNarrative(block);
+    if (narrative) signatures.add(normalizeAnalysisText(narrative));
+  });
+  return signatures;
+}
+
+function isDuplicateSectionAgainstAnalysisBlocks(section: any, blockSignatures: Set<string>) {
+  const title = normalizeAnalysisText(section?.title);
+  const content = normalizeAnalysisText(section?.content);
+  if (!title && !content) return false;
+  if (blockSignatures.has(title) || blockSignatures.has(content)) return true;
+  for (const signature of blockSignatures) {
+    if (!signature) continue;
+    if ((title && (title.includes(signature) || signature.includes(title))) || (content && (content.includes(signature) || signature.includes(content)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getTemplateSectionOrder(templateCode: string) {
+  if (templateCode === "executive_group_dimension") {
+    return [
+      "经营总览",
+      "管理公司/区域汇总",
+      "收入质量",
+      "客房效率",
+      "利润质量",
+      "成本效率",
+      "重点酒店与梯队",
+      "横向对标",
+      "横向对标与继续追问",
+      "结论",
+      "风险",
+      "建议",
+    ];
+  }
+  if (templateCode === "executive_hotel_snapshot") {
+    return [
+      "分析范围",
+      "经营总览",
+      "收入质量",
+      "客房效率",
+      "利润质量",
+      "成本效率",
+      "横向对标",
+      "结论",
+      "风险",
+      "建议",
+    ];
+  }
+  if (templateCode === "executive_portfolio") {
+    return [
+      "分析范围",
+      "经营总览",
+      "管理公司/区域汇总",
+      "收入质量",
+      "客房效率",
+      "利润质量",
+      "成本效率",
+      "重点酒店与梯队",
+      "横向对标",
+      "横向对标与继续追问",
+      "结论",
+      "风险",
+      "建议",
+    ];
+  }
+  return SECTION_TITLES_MANAGEMENT_ORDER;
+}
+
+function getTemplateSectionTitle(templateCode: string) {
+  if (templateCode === "executive_group_dimension") return "管理层速读";
+  if (templateCode === "executive_hotel_snapshot") return "经营摘要";
+  if (templateCode === "executive_portfolio") return "组合总览";
+  return "分层分析";
+}
+
+function getVisibleManagementSections(result: any) {
+  const sections = getPrimarySections(result);
+  if (!sections.length) return [];
+  const templateCode = getReportTemplateCode(result);
+  const order = getTemplateSectionOrder(templateCode);
+  const limit = templateCode === "executive_group_dimension" ? 4 : templateCode === "executive_hotel_snapshot" ? 3 : 5;
+  const analysisBlocks = getAnalysisBlocks(result);
+  const blockSignatures = analysisBlocks.length ? getAnalysisBlockSignatures(analysisBlocks) : null;
+
+  return sections
+    .map((section: any, index: number) => ({
+      section,
+      score: order.indexOf(String(section?.title || "")),
+      index,
+    }))
+    .filter(({ section }) => !blockSignatures || !isDuplicateSectionAgainstAnalysisBlocks(section, blockSignatures))
+    .sort((left, right) => {
+      const leftScore = left.score === -1 ? 999 + left.index : left.score;
+      const rightScore = right.score === -1 ? 999 + right.index : right.score;
+      return leftScore - rightScore;
+    })
+    .map((item) => item.section)
+    .filter((section) => Boolean(section?.content))
+    .slice(0, limit);
+}
+
+function getTemplateLeadLine(result: any) {
+  const sections = getVisibleManagementSections(result);
+  const firstSection = sections[0];
+  return getExecutiveSummaryLine(result) || firstSection?.content || getResultSummary(result);
 }
 
 function getManagementSections(result: any) {
@@ -359,13 +775,38 @@ function extractContext(result: any, question: string): ConversationContext {
     lastArea: area,
     lastTimeScope: parsed?.time_scope || null,
     lastScopeLabel: queryPlan?.query_object_label || hotel || area || null,
-    lastCompareMode: queryPlan?.analysis_mode || parsed?.compare_mode || null,
+    lastCompareMode: parsed?.compare_mode || null,
+    lastAnalysisMode: queryPlan?.analysis_mode || null,
+    lastAnalysisFocus: parsed?.analysis_focus || queryPlan?.analysis_focus || null,
     lastSummary: String(firstSection?.content || summary || "")
   };
 }
 
-function getFollowUpSuggestions(_context: ConversationContext) {
-  return BASE_FOLLOW_UP_SUGGESTIONS;
+function buildSemanticConversationContext(context: ConversationContext) {
+  return {
+    metric_code: context.lastMetric,
+    compare_mode: context.lastCompareMode,
+    time_scope: context.lastTimeScope,
+    requested_hotels: context.lastHotel ? [context.lastHotel] : [],
+    requested_areas: context.lastArea ? [context.lastArea] : [],
+    query_plan: {
+      query_object_label: context.lastScopeLabel,
+      analysis_mode: context.lastAnalysisMode,
+      analysis_focus: context.lastAnalysisFocus,
+    },
+    summary: context.lastSummary,
+    last_question: context.lastQuestion,
+  };
+}
+
+function getFollowUpSuggestions(context: ConversationContext) {
+  const suggestions: string[] = [];
+  if (context.lastAnalysisFocus !== "driver_analysis") suggestions.push("继续展开原因");
+  if (context.lastCompareMode !== "yoy") suggestions.push("看去年同期");
+  if (context.lastAnalysisFocus !== "income_structure") suggestions.push("看收入结构");
+  if (context.lastAnalysisFocus !== "profit_cost_efficiency") suggestions.push("看利润和成本效率");
+  if (context.lastAnalysisMode !== "management_report") suggestions.push("换成经营摘要");
+  return suggestions.slice(0, 5);
 }
 
 function getClarificationSuggestions(result: any) {
@@ -393,8 +834,20 @@ function getDataSourceLabel(result: any) {
 function getMetricLabel(result: any) {
   const metricCode = String(result?.parsed_intent?.metric_code || result?.metric_definition?.metric_code || "");
   if (metricCode === "OPERATING_PROFIT") return "\u7ecf\u8425\u5229\u6da6\uff08GOP\uff09";
-  if (metricCode === "OWNER_PROFIT") return "\u4e1a\u4e3b\u5229\u6da6\uff08\u7ecf\u8425\u51c0\u5229\u6da6\uff09";
+  if (metricCode === "OWNER_PROFIT") return "NOP业主净利润";
   return result?.metric_definition?.name_cn || result?.parsed_intent?.metric_code || "经营指标";
+}
+
+function getReportTemplateCode(result: any) {
+  return String(result?.parsed_intent?.query_plan?.report_template_code || "");
+}
+
+function getResultKicker(result: any) {
+  const templateCode = getReportTemplateCode(result);
+  if (templateCode === "executive_group_dimension") return "组合经营简报";
+  if (templateCode === "executive_hotel_snapshot") return "单店经营快照";
+  if (templateCode === "executive_portfolio") return "管理层经营简报";
+  return "经营分析";
 }
 
 function getPerformanceLabel(result: any) {
@@ -422,6 +875,7 @@ function getAnalysisModeLabel(value: unknown) {
   if (text === "portfolio_overview") return "组合总览";
   if (text === "hotel_metric_snapshot") return "单点快照";
   if (text === "management_report") return "管理摘要";
+  if (text === "group_by_dimension_report") return "分维度汇总";
   if (text === "driver_analysis") return "归因分析";
   if (text === "ranking_overview") return "排名概览";
   if (text === "budget") return "预算对比";
@@ -447,6 +901,52 @@ function getPortfolioMemberCount(result: any) {
   const plannedCount = result?.parsed_intent?.query_plan?.resolved_hotel_count;
   if (typeof plannedCount === "number" && !Number.isNaN(plannedCount)) return plannedCount;
   return null;
+}
+
+function getDimensionLabel(dimension: string) {
+  if (dimension === "manage_corp") return "管理公司";
+  if (dimension === "area") return "区域";
+  if (dimension === "manage_corp_area") return "管理公司 x 区域";
+  if (dimension === "brand_child") return "品牌";
+  return dimension;
+}
+
+function getDimensionRowLabel(dimension: string, row: any) {
+  if (dimension === "manage_corp_area") {
+    return `${row?.manage_corp || "未标注"} - ${row?.area || "未标注"}`;
+  }
+  if (dimension === "manage_corp") return row?.manage_corp || "未标注";
+  if (dimension === "area") return row?.area || "未标注";
+  if (dimension === "brand_child") return row?.brand_child || "未标注";
+  return row?.name || "未标注";
+}
+
+function getDimensionBreakdownGroups(result: any) {
+  const breakdowns = result?.dimension_breakdowns;
+  if (!breakdowns || typeof breakdowns !== "object") return [];
+  return ["manage_corp", "area", "manage_corp_area", "brand_child"]
+    .map((dimension) => {
+      const rows = Array.isArray(breakdowns?.[dimension]) ? breakdowns[dimension] : [];
+      return {
+        dimension,
+        title: getDimensionLabel(dimension),
+        rows: rows.slice(0, 6),
+      };
+    })
+    .filter((group) => group.rows.length > 0);
+}
+
+function getDimensionInsight(row: any) {
+  const diffRate = row?.diff_rate;
+  const diffValue = row?.diff_value;
+  if (typeof diffRate === "number" && !Number.isNaN(diffRate)) {
+    const direction = diffRate >= 0 ? "高于" : "低于";
+    return `${direction}对比口径 ${formatPercent(Math.abs(diffRate))}，差额 ${formatNumber(diffValue)}`;
+  }
+  if (typeof diffValue === "number" && !Number.isNaN(diffValue)) {
+    return `差额 ${formatNumber(diffValue)}`;
+  }
+  return "暂无差额口径";
 }
 
 function getPortfolioOutlierItems(result: any) {
@@ -486,6 +986,63 @@ function getPortfolioOutlierItems(result: any) {
         title: bucket.title,
         best: best?.hotel_name ? `${bucket.leadLabel}：${best.hotel_name}，${bucket.format(best)}` : null,
         worst: worst?.hotel_name ? `${bucket.lagLabel}：${worst.hotel_name}，${bucket.format(worst)}` : null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function getPortfolioMetricValue(row: any, fields: string[]) {
+  for (const field of fields) {
+    const value = row?.[field];
+    if (typeof value === "number" && !Number.isNaN(value)) return value;
+  }
+  return null;
+}
+
+function getPortfolioRankingGroups(rows: any[]) {
+  const configs = [
+    { label: "总收入", fields: ["total_income_actual"], direction: "desc" },
+    { label: "NOP业主净利润", fields: ["owner_profit_actual"], direction: "desc" },
+    { label: "GOP", fields: ["operating_profit_actual"], direction: "desc" },
+    { label: "RevPAR", fields: ["revpar_actual"], direction: "desc" },
+    { label: "差额", fields: ["diff_value"], direction: "asc" },
+  ];
+  return configs
+    .map((config) => {
+      const rankedRows = rows
+        .map((row) => ({ row, value: getPortfolioMetricValue(row, config.fields) }))
+        .filter((item) => item.value !== null)
+        .sort((left, right) => {
+          const diff = Number(right.value) - Number(left.value);
+          return config.direction === "asc" ? -diff : diff;
+        })
+        .slice(0, 5);
+      return { label: config.label, rows: rankedRows };
+    })
+    .filter((group) => group.rows.length >= 2);
+}
+
+function getOwnerProfitTierRows(rows: any[]) {
+  const buckets = [
+    { label: "2000万以上", min: 20000000, max: Infinity },
+    { label: "1000万-2000万", min: 10000000, max: 20000000 },
+    { label: "500万-1000万", min: 5000000, max: 10000000 },
+    { label: "200万-500万", min: 2000000, max: 5000000 },
+    { label: "0-200万", min: 0, max: 2000000 },
+    { label: "亏损", min: -Infinity, max: 0 },
+  ];
+  return buckets
+    .map((bucket) => {
+      const bucketRows = rows.filter((row) => {
+        const value = getPortfolioMetricValue(row, ["owner_profit_actual"]);
+        return value !== null && value >= bucket.min && value < bucket.max;
+      });
+      if (!bucketRows.length) return null;
+      const total = bucketRows.reduce((sum, row) => sum + Number(getPortfolioMetricValue(row, ["owner_profit_actual"]) || 0), 0);
+      return {
+        tier: bucket.label,
+        count: bucketRows.length,
+        value: total,
       };
     })
     .filter(Boolean);
@@ -651,7 +1208,183 @@ function ExternalBenchmarkCard({ benchmark }: { benchmark: any }) {
   );
 }
 
-function LoadingCard({ frame, step }: { frame: QuestionFrame | null; step: number }) {
+function SectionMetricTables({ groups, tierRows }: { groups: SectionMetricGroup[]; tierRows: SectionTierRow[] }) {
+  if (!groups.length && !tierRows.length) return null;
+  return (
+    <div className="structured-section" data-testid="structured-section-table">
+      {groups.length ? (
+        <div className="structured-table-grid">
+          {groups.map((group) => (
+            <div className="structured-table-card" key={group.metric}>
+              <div className="structured-table-title">{group.metric}</div>
+              <table className="structured-table">
+                <thead>
+                  <tr>
+                    <th>排名</th>
+                    <th>维度</th>
+                    <th>数据</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.rows.map((row, index) => (
+                    <tr key={`${group.metric}-${row.dimension}-${index}`}>
+                      <td>{row.rank || index + 1}</td>
+                      <td>{row.dimension}</td>
+                      <td className={parseDisplayNumber(row.value) !== null && Number(parseDisplayNumber(row.value)) < 0 ? "negative-number" : ""}>{row.value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {tierRows.length ? (
+        <div className="structured-table-card structured-table-card--wide">
+          <div className="structured-table-title">梯队汇总</div>
+          <table className="structured-table">
+            <thead>
+              <tr>
+                <th>梯队</th>
+                <th>数量</th>
+                <th>指标</th>
+                <th>合计</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tierRows.map((row) => (
+                <tr key={`${row.tier}-${row.metric}`}>
+                  <td>{row.tier}</td>
+                  <td>{row.count} 家</td>
+                  <td>{row.metric}</td>
+                  <td className={parseDisplayNumber(row.value) !== null && Number(parseDisplayNumber(row.value)) < 0 ? "negative-number" : ""}>{row.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PortfolioWatchlistSection({
+  rows,
+  outlierItems,
+  fallbackContent,
+}: {
+  rows: any[];
+  outlierItems: any[];
+  fallbackContent: string;
+}) {
+  const rankingGroups = getPortfolioRankingGroups(rows);
+  const tierRows = getOwnerProfitTierRows(rows);
+  if (!rankingGroups.length) {
+    const parsedGroups = parseSectionMetricGroups(fallbackContent);
+    const parsedTiers = parseSectionTierRows(fallbackContent);
+    return (
+      <>
+        <SectionMetricTables groups={parsedGroups} tierRows={parsedTiers} />
+        {!parsedGroups.length && !parsedTiers.length ? <div className="leadership-section-content">{fallbackContent}</div> : null}
+      </>
+    );
+  }
+  return (
+    <div className="portfolio-watchlist" data-testid="portfolio-watchlist-table">
+      <div className="structured-table-grid">
+        {rankingGroups.map((group) => (
+          <div className="structured-table-card" key={group.label}>
+            <div className="structured-table-title">{group.label}</div>
+            <table className="structured-table">
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>酒店</th>
+                  <th>数据</th>
+                </tr>
+              </thead>
+              <tbody>
+                {group.rows.map((item, index) => (
+                  <tr key={`${group.label}-${item.row?.hotel_name || index}`}>
+                    <td>{index + 1}</td>
+                    <td>{item.row?.hotel_name || "未知酒店"}</td>
+                    <td className={Number(item.value) < 0 ? "negative-number" : ""}>{formatNumber(item.value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+      {tierRows.length ? (
+        <div className="structured-table-card structured-table-card--wide">
+          <div className="structured-table-title">NOP业主净利润梯队</div>
+          <table className="structured-table">
+            <thead>
+              <tr>
+                <th>梯队</th>
+                <th>酒店数</th>
+                <th>合计 NOP</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tierRows.map((row: any) => (
+                <tr key={row.tier}>
+                  <td>{row.tier}</td>
+                  <td>{row.count} 家</td>
+                  <td className={row.value < 0 ? "negative-number" : ""}>{formatNumber(row.value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {outlierItems.length ? (
+        <div className="watchlist-outlier-strip">
+          {outlierItems.map((item: any) => (
+            <div className="watchlist-outlier-item" key={item.title}>
+              <strong>{item.title}</strong>
+              {item.best ? <span>{item.best}</span> : null}
+              {item.worst ? <span>{item.worst}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StructuredSectionContent({
+  section,
+  rows,
+  outlierItems,
+}: {
+  section: any;
+  rows: any[];
+  outlierItems: any[];
+}) {
+  const title = String(section?.title || "");
+  const content = String(section?.content || "");
+  if (title === "重点酒店与梯队") {
+    return <PortfolioWatchlistSection rows={rows} outlierItems={outlierItems} fallbackContent={content} />;
+  }
+  const metricGroups = parseSectionMetricGroups(content);
+  const tierRows = parseSectionTierRows(content);
+  if (metricGroups.length || tierRows.length) {
+    return (
+      <>
+        <SectionMetricTables groups={metricGroups} tierRows={tierRows} />
+        <details className="structured-section-source">
+          <summary>查看原始表述</summary>
+          <div className="leadership-section-content">{content}</div>
+        </details>
+      </>
+    );
+  }
+  return <div className="leadership-section-content">{content}</div>;
+}
+
+function LoadingCard({ frame, step, promptLabel }: { frame: QuestionFrame | null; step: number; promptLabel?: string | null }) {
   const items = frame
     ? [
         { label: "范围", value: frame.scope },
@@ -667,7 +1400,10 @@ function LoadingCard({ frame, step }: { frame: QuestionFrame | null; step: numbe
           <div className="result-kicker">正在处理</div>
           <div className="loading-title">先帮你确认口径，再读取经营数据。</div>
         </div>
-        {frame?.usedContext ? <span className="source-pill">已承接上文</span> : null}
+        <div className="loading-badges">
+          {promptLabel ? <span className="source-pill loading-pill">当前已选：{promptLabel}</span> : null}
+          {frame?.usedContext ? <span className="source-pill">已承接上文</span> : null}
+        </div>
       </div>
       {items.length ? (
         <div className="intent-strip" data-testid="loading-intent-strip">
@@ -686,6 +1422,121 @@ function LoadingCard({ frame, step }: { frame: QuestionFrame | null; step: numbe
             <span>{item}</span>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function PromptBank({
+  title,
+  description,
+  groups,
+  onSelect,
+  disabled = false,
+  selectedPrompt,
+  className = "",
+  feedbackLabel,
+  dataTestId,
+}: {
+  title: string;
+  description: string;
+  groups: PromptGroup[];
+  onSelect: (value: string) => void;
+  disabled?: boolean;
+  selectedPrompt?: string | null;
+  className?: string;
+  feedbackLabel?: string | null;
+  dataTestId?: string;
+}) {
+  if (!groups.length) return null;
+  return (
+    <section className={`prompt-bank panel ${className}`.trim()} data-testid={dataTestId}>
+      <div className="section-head prompt-bank-head">
+        <div>
+          <div className="panel-title">{title}</div>
+          <div className="section-desc">{description}</div>
+        </div>
+        {feedbackLabel ? <span className="prompt-feedback-pill">{feedbackLabel}</span> : null}
+      </div>
+      <div className="prompt-group-list">
+        {groups.map((group) => (
+          <div className="prompt-group" key={group.title}>
+            <div className="prompt-group-head">
+              <div className="prompt-group-title">{group.title}</div>
+              <div className="prompt-group-desc">{group.description}</div>
+            </div>
+            <div className="prompt-chip-list">
+              {group.items.map((item, index) => (
+                <button
+                  type="button"
+                  className={`prompt-chip ${selectedPrompt === item ? "active" : ""}`}
+                  key={`${group.title}-${item}-${index}`}
+                  disabled={disabled}
+                  onClick={() => onSelect(item)}
+                  data-testid={`${dataTestId || "prompt-bank"}-${group.title}-${index}`}
+                  aria-pressed={selectedPrompt === item}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AnalysisBlocksPanel({ blocks }: { blocks: any[] }) {
+  if (!blocks.length) return null;
+  return (
+    <div className="result-block analysis-block-section" data-testid="analysis-blocks">
+      <div className="result-block-title">结构化分析</div>
+      <div className="analysis-block-grid">
+        {blocks.map((block, index) => {
+          const title = getAnalysisBlockTitle(block, index);
+          const narrative = getAnalysisBlockNarrative(block);
+          const tags = getAnalysisBlockTags(block);
+          const status = getAnalysisBlockStatus(block);
+          const evidence = getAnalysisBlockEvidence(block);
+          const hasEvidence = evidence.metrics.length > 0 || evidence.fields.length > 0;
+          return (
+            <section className="analysis-block-card" key={`${title}-${index}`}>
+              <div className="analysis-block-head">
+                <div className="analysis-block-title">{title}</div>
+                <div className="analysis-block-pill-row">
+                  {status ? <span className={`analysis-block-status analysis-block-status--${status.tone}`}>{status.label}</span> : null}
+                  {block?.tag ? <span className="analysis-block-pill">{String(block.tag)}</span> : null}
+                </div>
+              </div>
+              {narrative ? <div className="analysis-block-summary">{narrative}</div> : null}
+              {tags.length ? (
+                <div className="analysis-block-tags">
+                  {tags.map((item: string) => (
+                    <span className="analysis-block-tag" key={item}>{item}</span>
+                  ))}
+                </div>
+              ) : null}
+              {hasEvidence ? (
+                <details className="analysis-block-evidence">
+                  <summary>查看证据字段</summary>
+                  {evidence.metrics.length ? (
+                    <div className="analysis-block-evidence-row">
+                      <span>指标</span>
+                      <strong>{evidence.metrics.join(" / ")}</strong>
+                    </div>
+                  ) : null}
+                  {evidence.fields.length ? (
+                    <div className="analysis-block-evidence-row">
+                      <span>字段</span>
+                      <strong>{evidence.fields.join(" / ")}</strong>
+                    </div>
+                  ) : null}
+                </details>
+              ) : null}
+            </section>
+          );
+        })}
       </div>
     </div>
   );
@@ -711,7 +1562,7 @@ function inferAnalysisFocus(input: string, mode: ActionMode): AnalysisFocus {
   if (/原因|为什么|归因|继续展开/.test(text)) {
     return "driver_analysis";
   }
-  if (/同比/.test(text)) {
+  if (/同比|去年同期/.test(text)) {
     return "yoy_change";
   }
   if (/收入结构|收入质量|客房收入|餐饮|宴会/.test(text)) {
@@ -785,7 +1636,7 @@ function rewriteFollowUpQuestion(input: string, context: ConversationContext) {
     };
   }
 
-  if (trimmed.includes("同比变化")) {
+  if (trimmed.includes("同比变化") || trimmed.includes("去年同期")) {
     return {
       rewritten: `基于“${lastQuestion}”，切换成同比变化口径。`,
       usedContext: true
@@ -863,40 +1714,74 @@ function ResultCard({
   onFollowUp,
   disabled = false,
   suggestions = BASE_FOLLOW_UP_SUGGESTIONS,
-  showTechnicalDetails = false
+  showTechnicalDetails = false,
+  selectedPromptLabel = null,
 }: {
   result: any;
   onFollowUp: (value: string) => void;
   disabled?: boolean;
   suggestions?: string[];
   showTechnicalDetails?: boolean;
+  selectedPromptLabel?: string | null;
 }) {
   const highlights = getHighlights(result);
   const sections = getPrimarySections(result);
-  const executiveLine = getExecutiveSummaryLine(result);
   const finalSuggestions = result?.interaction_mode === "clarification" ? getClarificationSuggestions(result) : suggestions;
   const displayRows = getDisplayRows(result);
   const firstPoint = displayRows.length ? displayRows[0] : null;
   const performanceLabel = getPerformanceLabel(result);
   const recognizedScopeItems = getRecognizedScopeItems(result);
+  const narrativeBrief = getNarrativeBrief(result);
   const portfolioSummaryPoint = Array.isArray(result?.data_points) && result.data_points.length ? result.data_points[0] : null;
   const isPortfolio = String(result?.parsed_intent?.query_plan?.query_grain || "") === "portfolio";
   const portfolioMemberCount = getPortfolioMemberCount(result);
   const portfolioOutlierItems = getPortfolioOutlierItems(result);
-  const managementSections = getManagementSections(result);
-  const showInlineManagementSections = !showTechnicalDetails && managementSections.length > 0;
+  const analysisBlocks = getAnalysisBlocks(result);
+  const hasAnalysisBlocks = analysisBlocks.length > 0;
+  const dimensionBreakdownGroups = getDimensionBreakdownGroups(result);
+  const templateCode = getReportTemplateCode(result);
+  const isGroupDimensionTemplate = templateCode === "executive_group_dimension";
+  const isHotelSnapshotTemplate = templateCode === "executive_hotel_snapshot";
+  const visibleManagementSections = getVisibleManagementSections(result);
+  const showInlineManagementSections = !showTechnicalDetails && visibleManagementSections.length > 0;
+  const resultTitle = getTemplateSectionTitle(templateCode);
+  const templateLeadLine = getTemplateLeadLine(result);
+  const showObservationBlock = !showTechnicalDetails && !hasAnalysisBlocks && !visibleManagementSections.length && highlights.length > 0;
+  const showTopDataPoints = !isGroupDimensionTemplate && displayRows.length > 0;
   const compareModeLabel = getAnalysisModeLabel(result?.parsed_intent?.compare_mode || "system_default");
-  const compareBasisLine = `当前默认按${compareModeLabel}对比，差额表示实际值减对应对比口径。`;
   const sampleCountLabel = isPortfolio ? formatNumber(portfolioMemberCount) : formatNumber(result?.data_points?.length);
+  const traceEvents = Array.isArray(result?.trace_events) ? result.trace_events as TraceEvent[] : [];
+  const followUpGroups = getFollowUpPromptGroups(
+    {
+      lastQuestion: String(result?.original_question || result?.parsed_intent?.question || result?.question || ""),
+      lastMetric: String(result?.parsed_intent?.metric_code || result?.metric_definition?.metric_code || ""),
+      lastHotel: String(result?.parsed_intent?.requested_hotel || result?.parsed_intent?.query_plan?.query_object_label || ""),
+      lastArea: String(result?.parsed_intent?.requested_area || ""),
+      lastTimeScope: String(result?.parsed_intent?.time_scope || result?.parsed_intent?.query_plan?.time_scope || ""),
+      lastScopeLabel: String(result?.parsed_intent?.query_plan?.query_object_label || ""),
+      lastCompareMode: String(result?.parsed_intent?.compare_mode || ""),
+      lastAnalysisMode: String(result?.parsed_intent?.query_plan?.analysis_mode || ""),
+      lastAnalysisFocus: String(result?.parsed_intent?.analysis_focus || ""),
+      lastSummary: String(result?.summary || ""),
+    },
+    finalSuggestions
+  );
   return (
-    <div className="result-card" data-testid="result-card">
+    <div className={`result-card ${templateCode ? `result-card--${templateCode.replace(/_/g, "-")}` : "result-card--default"}`} data-testid="result-card">
       <div className="assistant-card-head">
         <div>
-          <div className="result-kicker">经营分析</div>
-          <div className="result-summary" data-testid="result-summary">{getResultSummary(result)}</div>
+          <div className="result-kicker">{getResultKicker(result)}</div>
+          <div className="result-summary" data-testid="result-summary">{narrativeBrief || getResultSummary(result)}</div>
         </div>
         <span className="source-pill">{getDataSourceLabel(result)}</span>
       </div>
+
+      <div className="result-block result-briefing" data-testid="management-overview">
+        <div className="result-block-title">{resultTitle}</div>
+        <div className="result-briefing-text">{templateLeadLine}</div>
+      </div>
+
+      {hasAnalysisBlocks ? <AnalysisBlocksPanel blocks={analysisBlocks} /> : null}
 
       {false ? <div className="result-block" data-testid="management-observation">
         <div className="result-block-title">ç»è¥è§‚å¯Ÿ</div>
@@ -904,7 +1789,7 @@ function ResultCard({
       </div> : null}
 
       {firstPoint ? (
-        <div className="metric-strip" data-testid="primary-metric-strip">
+        <div className="metric-strip metric-strip--template" data-testid="primary-metric-strip">
           <div className="metric-tile">
             <span>{isPortfolio ? "组合" : "酒店"}</span>
             <strong>{(isPortfolio ? portfolioSummaryPoint?.hotel_name : firstPoint.hotel_name) || "当前范围"}</strong>
@@ -924,7 +1809,7 @@ function ResultCard({
         </div>
       ) : null}
 
-      {compareBasisLine ? (
+      {false && compareBasisLine ? (
         <div className="result-block" data-testid="executive-overview">
         <div className="result-block-title">{SECTION_TITLE_MANAGEMENT}</div>
           <div className="executive-line">{compareBasisLine}</div>
@@ -938,23 +1823,93 @@ function ResultCard({
         {result?.parsed_intent?.compare_mode ? <span className="meta-pill">口径：{compareModeLabel}</span> : null}
       </div>
 
-      <div className="intent-strip" data-testid="recognized-scope">
-        {recognizedScopeItems.map((item) => (
-          <div className="intent-chip" key={item.label}>
-            <span>{item.label}</span>
-            <strong>{item.value}</strong>
-          </div>
-        ))}
+      <div className="result-block insight-block" data-testid="recognized-scope">
+        <div className="result-block-title">当前理解</div>
+        <div className="section-desc">系统已经识别出的范围、时间、指标和口径。</div>
+        <div className="intent-strip">
+          {recognizedScopeItems.map((item) => (
+            <div className="intent-chip" key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+            </div>
+          ))}
+        </div>
       </div>
+
+      {isGroupDimensionTemplate && dimensionBreakdownGroups.length ? (
+        <div className="result-block" data-testid="dimension-breakdowns">
+          <div className="result-block-title">分维度汇总</div>
+          <div className="dimension-breakdown-grid">
+            {dimensionBreakdownGroups.map((group) => (
+              <section className="dimension-breakdown-card" key={group.dimension}>
+                <div className="dimension-breakdown-head">
+                  <div className="dimension-breakdown-title">{group.title}</div>
+                  <div className="dimension-breakdown-subtitle">按当前问题自动提炼的重点分组</div>
+                </div>
+                <div className="dimension-breakdown-list">
+                  {group.rows.map((row: any, index: number) => (
+                    <div className="dimension-breakdown-row" key={`${group.dimension}-${getDimensionRowLabel(group.dimension, row)}-${index}`}>
+                      <div className="dimension-breakdown-rank">{index + 1}</div>
+                      <div className="dimension-breakdown-main">
+                        <div className="dimension-breakdown-name">{getDimensionRowLabel(group.dimension, row)}</div>
+                        <div className="dimension-breakdown-insight">{getDimensionInsight(row)}</div>
+                      </div>
+                      <div className="dimension-breakdown-metrics">
+                        <span>{formatNumber(row?.hotel_count)} 家</span>
+                        <span>收入 {formatNumber(row?.total_income_actual)}</span>
+                        <span>NOP {formatNumber(row?.owner_profit_actual)}</span>
+                        <span>RevPAR {formatNumber(row?.revpar_actual)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {showInlineManagementSections ? (
         <div className="result-block" data-testid="management-sections">
           <div className="result-block-title">åˆ†å±‚åˆ†æž</div>
-          <div className="management-section-grid">
-            {managementSections.map((section: any, index: number) => (
-              <section className="management-section-card" key={`${section.title}-${index}`} data-testid={`section-${section.title}`}>
-                <div className="management-section-title">{section.title}</div>
-                <div className="management-section-content">{section.content}</div>
+          <div className={`leadership-section-grid leadership-section-grid--${templateCode ? templateCode.replace(/_/g, "-") : "default"}`}>
+            {visibleManagementSections.map((section: any, index: number) => (
+              <section className={`leadership-section-card ${index === 0 ? "leadership-section-card--feature" : ""}`} key={`${section.title}-${index}`} data-testid={`section-${section.title}`}>
+                <div className="leadership-section-title">{section.title}</div>
+                <StructuredSectionContent section={section} rows={displayRows} outlierItems={portfolioOutlierItems} />
+              </section>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {!isGroupDimensionTemplate && dimensionBreakdownGroups.length ? (
+        <div className="result-block" data-testid="dimension-breakdowns">
+          <div className="result-block-title">分维度汇总</div>
+          <div className="dimension-breakdown-grid">
+            {dimensionBreakdownGroups.map((group) => (
+              <section className="dimension-breakdown-card" key={group.dimension}>
+                <div className="dimension-breakdown-head">
+                  <div className="dimension-breakdown-title">{group.title}</div>
+                  <div className="dimension-breakdown-subtitle">按当前问题自动提炼的重点分组</div>
+                </div>
+                <div className="dimension-breakdown-list">
+                  {group.rows.map((row: any, index: number) => (
+                    <div className="dimension-breakdown-row" key={`${group.dimension}-${getDimensionRowLabel(group.dimension, row)}-${index}`}>
+                      <div className="dimension-breakdown-rank">{index + 1}</div>
+                      <div className="dimension-breakdown-main">
+                        <div className="dimension-breakdown-name">{getDimensionRowLabel(group.dimension, row)}</div>
+                        <div className="dimension-breakdown-insight">{getDimensionInsight(row)}</div>
+                      </div>
+                      <div className="dimension-breakdown-metrics">
+                        <span>{formatNumber(row?.hotel_count)} 家</span>
+                        <span>收入 {formatNumber(row?.total_income_actual)}</span>
+                        <span>NOP {formatNumber(row?.owner_profit_actual)}</span>
+                        <span>RevPAR {formatNumber(row?.revpar_actual)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </section>
             ))}
           </div>
@@ -964,7 +1919,7 @@ function ResultCard({
       <InternalBenchmarkCard benchmark={result?.internal_benchmark} />
       <ExternalBenchmarkCard benchmark={result?.external_benchmark} />
 
-      {displayRows.length ? (
+      {showTopDataPoints && !isHotelSnapshotTemplate ? (
         <div className="result-block" data-testid="top-data-points">
           <div className="result-block-title">{isPortfolio ? "组合内重点酒店" : "关键数据"}</div>
           <div className="mobile-section-list">
@@ -995,7 +1950,7 @@ function ResultCard({
         </div>
       ) : null}
 
-      {highlights.length ? (
+      {showObservationBlock && !isGroupDimensionTemplate ? (
         <div className="result-block" data-testid="risk-highlights">
         <div className="result-block-title">{SECTION_TITLE_OBSERVATION}</div>
           <div className="chip-list">
@@ -1031,6 +1986,19 @@ function ResultCard({
             <span className="meta-pill">来源：{getDataSourceLabel(result)}</span>
             {performanceLabel ? <span className="meta-pill">耗时：{performanceLabel}</span> : null}
           </div>
+          {traceEvents.length ? (
+            <div className="trace-events-summary" data-testid="trace-events-summary">
+              {traceEvents.map((event, index) => (
+                <div className="trace-event-row" key={`${event.stage || "stage"}-${index}`}>
+                  <div>
+                    <strong>{getTraceStageLabel(event.stage)}</strong>
+                    <span>{getTraceStatusLabel(event.status)}</span>
+                  </div>
+                  {getTraceEventNote(event) ? <em>{getTraceEventNote(event)}</em> : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {result?.performance ? <pre className="pre diagnostic-pre">{formatJson(result.performance)}</pre> : null}
         </details>
       ) : null}
@@ -1070,25 +2038,17 @@ function ResultCard({
         </details>
       ) : null}
 
-      <details className="details-card follow-up-details-card" data-testid="follow-up-actions">
-        <summary>你可以继续问</summary>
-        <div className="result-block">
-          <div className="chip-list">
-            {finalSuggestions.map((item, index) => (
-              <button
-                type="button"
-                className="chip"
-                key={item}
-                disabled={disabled}
-                onClick={() => onFollowUp(item)}
-                data-testid={`follow-up-${index}`}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-        </div>
-      </details>
+      <PromptBank
+        title="你可以继续问"
+        description="顺着当前结果继续展开，或者把范围再缩一层。"
+        groups={followUpGroups}
+        selectedPrompt={selectedPromptLabel}
+        onSelect={onFollowUp}
+        disabled={disabled}
+        className="follow-up-prompt-bank"
+        feedbackLabel={selectedPromptLabel ? (disabled ? "正在继续追问" : "最近一次操作") : null}
+        dataTestId="follow-up-actions"
+      />
     </div>
   );
 }
@@ -1098,10 +2058,12 @@ export default function App() {
   const [timeScope, setTimeScope] = useState(() => getPreviousMonthScope());
   const [role, setRole] = useState<Role>(() => getInitialRole());
   const [actionMode, setActionMode] = useState<ActionMode>("query");
+  const [viewMode, setViewMode] = useState<ViewMode>(() => (getInitialRole() === "GROUP_ADMIN" ? "management" : "debug"));
   const [externalBenchmark, setExternalBenchmark] = useState(false);
   const [status, setStatus] = useState<QueryStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [contextHint, setContextHint] = useState<string | null>(null);
+  const [selectedPromptLabel, setSelectedPromptLabel] = useState<string | null>(null);
   const [activeFrame, setActiveFrame] = useState<QuestionFrame | null>(null);
   const [loadingStep, setLoadingStep] = useState(0);
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
@@ -1114,7 +2076,7 @@ export default function App() {
   const requestIdRef = useRef(1);
 
   const isLoading = status === "loading";
-  const showTechnicalDetails = role !== "GROUP_ADMIN";
+  const showTechnicalDetails = viewMode === "debug" || role !== "GROUP_ADMIN";
   const collapseConversationHistory = false && role === "GROUP_ADMIN";
   const quickQuestions = systemSettings?.quick_questions?.length ? systemSettings.quick_questions : FALLBACK_QUICK_QUESTIONS;
   const sortedConversations = useMemo(
@@ -1126,6 +2088,7 @@ export default function App() {
   }, [activeConversationId, conversations, sortedConversations]);
   const messages = activeConversation.messages;
   const conversationContext = activeConversation.context || EMPTY_CONTEXT;
+  const starterPromptGroups = getStarterPromptGroups(conversationContext, quickQuestions);
   const contextSnapshotItems = getContextSnapshotItems(conversationContext);
 
   useEffect(() => {
@@ -1147,6 +2110,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(ROLE_STORAGE_KEY, role);
+    if (role !== "GROUP_ADMIN") setViewMode("debug");
   }, [role]);
 
   useEffect(() => {
@@ -1194,6 +2158,7 @@ export default function App() {
     setActiveConversationId(conversation.id);
     setQuestion("");
     setContextHint(null);
+    setSelectedPromptLabel(null);
     setError(null);
     setActiveFrame(null);
     setStatus("idle");
@@ -1203,12 +2168,13 @@ export default function App() {
     setActiveConversationId(conversationId);
     setQuestion("");
     setContextHint(null);
+    setSelectedPromptLabel(null);
     setError(null);
     setActiveFrame(null);
     if (!isLoading) setStatus("idle");
   }
 
-  async function run(nextQuestion?: string, options?: { useContextRewrite?: boolean }) {
+  async function run(nextQuestion?: string, options?: { useContextRewrite?: boolean; promptLabel?: string | null }) {
     const rawQuestion = (nextQuestion ?? question).trim();
     if (!rawQuestion) return;
 
@@ -1217,6 +2183,7 @@ export default function App() {
     const rewritten = options?.useContextRewrite === false ? { rewritten: rawQuestion, usedContext: false } : rewriteFollowUpQuestion(rawQuestion, currentContext);
     const finalQuestion = rewritten.rewritten;
     const effectiveMode = resolveActionMode(rawQuestion, actionMode);
+    const promptLabel = options?.promptLabel ?? null;
 
     const currentRequestId = ++requestIdRef.current;
     const userMessage: Message = {
@@ -1236,6 +2203,7 @@ export default function App() {
     setStatus("loading");
     setLoadingStep(0);
     setActiveFrame(inferQuestionFrame(finalQuestion, timeScope, effectiveMode, rewritten.usedContext));
+    setSelectedPromptLabel(promptLabel);
     setError(null);
     if (nextQuestion) setQuestion(nextQuestion);
     setContextHint(null);
@@ -1243,7 +2211,13 @@ export default function App() {
     try {
       const payload = {
         question: finalQuestion,
-        context: { time_scope: timeScope, language: "zh-CN", external_benchmark: externalBenchmark, analysis_focus: inferAnalysisFocus(rawQuestion, effectiveMode) },
+        context: {
+          time_scope: timeScope,
+          language: "zh-CN",
+          external_benchmark: externalBenchmark,
+          analysis_focus: inferAnalysisFocus(rawQuestion, effectiveMode),
+          conversation_context: buildSemanticConversationContext(currentContext),
+        },
         auth: { user_id: "u001", role }
       };
       const result = effectiveMode === "report" ? await submitReport(payload) : await submitQuery(payload);
@@ -1301,7 +2275,13 @@ export default function App() {
     } else {
       setContextHint(null);
     }
-    void run(value);
+    void run(value, { promptLabel: value });
+  }
+
+  function handleStarterPrompt(value: string) {
+    setQuestion(value);
+    setContextHint(null);
+    void run(value, { useContextRewrite: false, promptLabel: value });
   }
 
   return (
@@ -1391,7 +2371,16 @@ export default function App() {
         ) : null}
 
         <div className="quick-strip">
-          <QuickQuestions onSelect={(q) => void run(q, { useContextRewrite: false })} activeQuestion={question} disabled={isLoading} questions={quickQuestions} />
+          <PromptBank
+            title="常用切入"
+            description="点一下就能直接进入经营对话，不用先学系统语法。"
+            groups={starterPromptGroups}
+            selectedPrompt={selectedPromptLabel}
+            onSelect={handleStarterPrompt}
+            disabled={isLoading}
+            feedbackLabel={selectedPromptLabel && isLoading ? `正在处理：${selectedPromptLabel}` : selectedPromptLabel ? `已选：${selectedPromptLabel}` : null}
+            dataTestId="starter-prompts"
+          />
         </div>
 
         <main className="chat-thread">
@@ -1405,6 +2394,7 @@ export default function App() {
                     disabled={isLoading}
                     suggestions={getFollowUpSuggestions(conversationContext)}
                     showTechnicalDetails={showTechnicalDetails}
+                    selectedPromptLabel={selectedPromptLabel}
                   />
                 ) : (
                   <div className="message-text">
@@ -1421,7 +2411,7 @@ export default function App() {
           {isLoading ? (
             <div className="message-row assistant">
               <div className="message-bubble assistant" data-testid="typing-bubble">
-                <LoadingCard frame={activeFrame} step={loadingStep} />
+                <LoadingCard frame={activeFrame} step={loadingStep} promptLabel={selectedPromptLabel} />
               </div>
             </div>
           ) : null}
@@ -1459,6 +2449,21 @@ export default function App() {
                 </select>
               </label>
               ) : null}
+
+              <label className="field view-mode-field">
+                <span className="field-label">视图模式</span>
+                <button
+                  type="button"
+                  className={`toggle-btn ${viewMode === "debug" ? "active" : ""}`}
+                  onClick={() => setViewMode((current) => (current === "debug" ? "management" : "debug"))}
+                  data-testid="view-mode-toggle"
+                >
+                  {VIEW_MODE_OPTIONS.find((option) => option.value === viewMode)?.label || "管理层视图"}
+                </button>
+                <span className="field-help">
+                  {VIEW_MODE_OPTIONS.find((option) => option.value === viewMode)?.helper}
+                </span>
+              </label>
 
               <label className="field">
                 <span className="field-label">外部行业对标</span>

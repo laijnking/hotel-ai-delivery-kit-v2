@@ -18,6 +18,7 @@ app = FastAPI(title="semantic-service")
 CONFIG = Path(__file__).resolve().parents[3] / "configs" / "semantic_mapping.yaml"
 ENTITY_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "entity_catalog.yaml"
 SKILL_REGISTRY = Path(__file__).resolve().parents[3] / "skills" / "registry.yaml"
+METRIC_BUNDLES_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "metric_bundles.yaml"
 WAREHOUSE_DIR = Path(os.getenv("WAREHOUSE_DIR", Path(__file__).resolve().parents[3] / "runtime" / "warehouse"))
 DUCKDB_PATH = Path(os.getenv("WAREHOUSE_DUCKDB_PATH", WAREHOUSE_DIR / "hotel_warehouse.duckdb"))
 _SPACE_RE = re.compile(r"\s+")
@@ -29,9 +30,18 @@ _HOTEL_PATTERN = re.compile(r"([\u4e00-\u9fa5A-Za-z0-9]{2,30}?(?:酒店|假日|�
 _HOTEL_PREFIX_RE = re.compile(r"^(?:请|麻烦|帮我|帮忙|给我|看一下|看下|看一看|看看|看|分析一下|分析|查一下|查询|了解一下|说说|讲讲)+")
 _HOTEL_TRAILING_RE = re.compile(r"(?:本月|当月|这个月|上月|去年同期|同比|预算|经营情况|经营状况|表现|情况|怎么样|如何|咋样|[0-9]{1,2}月|20\d{2}年.*)$")
 _METRIC_LABELS = {
-    "OPERATING_PROFIT": "经营利润",
+    "OPERATING_PROFIT": "经营利润（GOP）",
+    "OWNER_PROFIT": "NOP业主净利润",
     "TOTAL_INCOME": "总收入",
+    "ROOM_INCOME": "客房收入",
+    "RESTAURANT_INCOME": "餐饮收入",
+    "BANQUET_INCOME": "宴会收入",
+    "ADR": "ADR",
+    "OCCUPANCY_RATE": "入住率",
     "REVPAR": "每房收益",
+    "PEOPLE_COST": "人工成本",
+    "ENERGY_EXPENSES": "能耗费用",
+    "RESTAURANT_COST": "餐饮成本",
     "OPERATING_HOTEL_COUNT": "在营酒店数",
 }
 _BUSINESS_OVERVIEW_TERMS = ("经营情况", "经营状况", "经营表现", "经营概况", "营业情况", "整体情况", "总体情况")
@@ -77,11 +87,15 @@ DEEP_LLM_MODEL = os.getenv("QWEN_DEEP_MODEL", "").strip() or os.getenv("QWEN_MOD
 LLM_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "12"))
 LLM_PARSE_POLICY = os.getenv("QWEN_PARSE_POLICY", "auto").strip().lower()
 LLM_PARSE_CONFIDENCE_THRESHOLD = float(os.getenv("QWEN_PARSE_CONFIDENCE_THRESHOLD", "0.82"))
+_FOLLOW_UP_DRIVER_TERMS = ("原因", "为什么", "归因", "解释", "展开原因")
+_FOLLOW_UP_REFINE_TERMS = ("只看", "仅看", "切到", "改看", "换成", "换到", "聚焦到", "聚焦")
+_FOLLOW_UP_CONTINUE_TERMS = ("继续", "展开", "追问", "再看")
 
 
 class Req(BaseModel):
     question: str = Field(..., min_length=2)
     time_scope: str | None = None
+    conversation_context: dict | None = None
 
 
 @app.get("/health")
@@ -133,6 +147,60 @@ def load_skills() -> list[dict]:
         skill.setdefault("version", item.get("version"))
         skills.append(skill)
     return skills
+
+
+@lru_cache(maxsize=1)
+def load_metric_bundles() -> dict[str, dict]:
+    if not METRIC_BUNDLES_CONFIG.exists():
+        return {}
+    with open(METRIC_BUNDLES_CONFIG, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    bundles = data.get("bundles", {}) if isinstance(data, dict) else {}
+    return bundles if isinstance(bundles, dict) else {}
+
+
+def _load_config_aliases(section: str) -> dict[str, list[str]]:
+    cfg = load_config()
+    raw = cfg.get(section, {}) if isinstance(cfg, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    aliases: dict[str, list[str]] = {}
+    for axis, values in raw.items():
+        if not isinstance(values, list):
+            continue
+        cleaned = [str(item).strip() for item in values if str(item).strip()]
+        if cleaned:
+            aliases[str(axis)] = cleaned
+    return aliases
+
+
+@lru_cache(maxsize=1)
+def load_follow_up_aliases() -> dict[str, list[str]]:
+    aliases = _load_config_aliases("follow_up_aliases")
+    if aliases:
+        return aliases
+    return {
+        "driver": [term for term in _FOLLOW_UP_DRIVER_TERMS],
+        "refine_scope": [term for term in _FOLLOW_UP_REFINE_TERMS],
+        "compare_shift": ["换成同比", "改成同比", "切成同比", "换成预算", "改成预算", "切成预算"],
+        "continue": [term for term in _FOLLOW_UP_CONTINUE_TERMS],
+    }
+
+
+@lru_cache(maxsize=1)
+def load_dimension_aliases() -> dict[str, list[str]]:
+    aliases = _load_config_aliases("dimension_aliases")
+    if aliases:
+        return aliases
+    return {
+        "manage_corp": ["管理公司", "管理方", "管理集团", "管理口径"],
+        "brand": ["品牌", "品牌维度", "品牌汇总", "品牌口径"],
+        "brand_child": ["子品牌", "子品牌维度", "子品牌汇总", "细分品牌"],
+        "area": ["区域", "大区", "区域维度", "区域汇总"],
+        "hotel": ["酒店", "单店", "门店", "酒店维度", "酒店汇总"],
+        "month": ["月份", "月份维度", "时间", "时间维度", "本月", "去年同期", "同比"],
+        "subject_hierarchy": ["科目", "科目层级", "科目上下级", "科目树", "部门", "部门层级", "账目", "PnL"],
+    }
 
 
 def match_skill(question_norm: str) -> dict | None:
@@ -326,8 +394,49 @@ def load_entity_catalog() -> dict[str, list[str]]:
 
 
 @lru_cache(maxsize=1)
+def load_entity_aliases() -> dict[str, dict[str, list[str]]]:
+    if not ENTITY_CONFIG.exists():
+        return {}
+    with open(ENTITY_CONFIG, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    aliases = cfg.get("aliases", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(aliases, dict):
+        return {}
+
+    result: dict[str, dict[str, list[str]]] = {}
+    for entity_name, entity_aliases in aliases.items():
+        if not isinstance(entity_aliases, dict):
+            continue
+        canonical_map: dict[str, list[str]] = {}
+        for canonical, alias_values in entity_aliases.items():
+            if isinstance(alias_values, str):
+                values = [alias_values]
+            elif isinstance(alias_values, list):
+                values = [str(item).strip() for item in alias_values if str(item).strip()]
+            else:
+                values = []
+            if values:
+                canonical_map[str(canonical).strip()] = values
+        if canonical_map:
+            result[str(entity_name).strip()] = canonical_map
+    return result
+
+
+@lru_cache(maxsize=1)
 def load_scope_graph() -> list[dict[str, str]]:
     return _fetch_runtime_scope_graph()
+
+
+def entity_alias_norms(entity_name: str, value: str) -> list[str]:
+    alias_norms = [normalize_text(value)]
+    configured = load_entity_aliases().get(entity_name, {}).get(value, [])
+    for alias in configured:
+        alias_norm = normalize_text(alias)
+        if alias_norm and alias_norm not in alias_norms:
+            alias_norms.append(alias_norm)
+    if entity_name == "hotel" and not value.endswith(("酒店", "公寓")):
+        alias_norms.append(f"{alias_norms[0]}酒店")
+    return [alias for alias in alias_norms if alias]
 
 
 def match_catalog_entities(question: str, entity_name: str) -> list[str]:
@@ -340,9 +449,7 @@ def match_catalog_entities(question: str, entity_name: str) -> list[str]:
         value_norm = normalize_text(value)
         if not value_norm:
             continue
-        alias_norms = [value_norm]
-        if entity_name == "hotel" and not value.endswith(("酒店", "公寓")):
-            alias_norms.append(f"{value_norm}酒店")
+        alias_norms = entity_alias_norms(entity_name, value)
         if any(alias in question_norm for alias in alias_norms):
             if value not in matches:
                 matches.append(value)
@@ -354,6 +461,10 @@ def match_catalog_entities(question: str, entity_name: str) -> list[str]:
 
 def match_terms(question_norm: str, terms: tuple[str, ...]) -> list[str]:
     return [term for term in terms if normalize_text(term) in question_norm]
+
+
+def normalize_context(context: object) -> dict[str, object]:
+    return context if isinstance(context, dict) else {}
 
 
 def normalize_manage_corp(value: str) -> str:
@@ -369,8 +480,14 @@ def normalize_text(value: str | None) -> str:
     return _SPACE_RE.sub("", value).casefold()
 
 
-def normalize_time_scope(time_scope: str | None, defaults: dict, warnings: list[str], question: str = "") -> str:
-    candidate = (time_scope or "").strip()
+def normalize_time_scope(
+    time_scope: str | None,
+    defaults: dict,
+    warnings: list[str],
+    question: str = "",
+    seed_time_scope: str | None = None,
+) -> str:
+    candidate = (time_scope or seed_time_scope or "").strip()
     if candidate and _TIME_SCOPE_RE.fullmatch(candidate):
         base_year = candidate[:4]
     else:
@@ -390,6 +507,53 @@ def normalize_time_scope(time_scope: str | None, defaults: dict, warnings: list[
     if candidate and _TIME_SCOPE_RE.fullmatch(candidate):
         return candidate
     return str(defaults.get("time_scope", "202601")).strip() or "202601"
+
+
+def detect_follow_up_mode(question_norm: str) -> str | None:
+    aliases = load_follow_up_aliases()
+    if any(term in question_norm for term in aliases.get("driver", [])):
+        return "driver"
+    if any(term in question_norm for term in aliases.get("refine_scope", [])):
+        return "refine_scope"
+    switch_terms = ("换成", "改成", "切成", "切换到", "转成")
+    compare_terms = {normalize_text(item) for values in load_config().get("compare_keywords", {}).values() if isinstance(values, list) for item in values}
+    if any(term in question_norm for term in switch_terms) and any(term in question_norm for term in compare_terms):
+        return "compare_shift"
+    if any(term in question_norm for term in aliases.get("continue", [])):
+        return "continue"
+    return None
+
+
+def detect_analysis_focus(
+    question_norm: str,
+    metric_code: str,
+    intent: str,
+    portfolio_like: bool,
+    group_by_dimensions: list[str],
+    follow_up_mode: str | None,
+    dimension_axes: list[str],
+) -> str:
+    if metric_code == "OPERATING_HOTEL_COUNT":
+        return "scope_inventory"
+    if group_by_dimensions:
+        return "dimension_comparison"
+    if "subject_hierarchy" in dimension_axes:
+        return "pnl_hierarchy"
+    if follow_up_mode == "compare_shift":
+        return "comparison_shift"
+    if follow_up_mode == "driver" or intent == "explain":
+        return "driver_analysis"
+    if any(term in question_norm for term in ("收入结构", "收入质量", "营收结构", "餐饮收入", "宴会收入", "客房收入")):
+        return "income_structure"
+    if any(term in question_norm for term in ("利润质量", "成本效率", "人工成本", "能耗", "费用率", "利润成本")):
+        return "profit_cost_efficiency"
+    if intent == "report" or any(normalize_text(term) in question_norm for term in _BUSINESS_OVERVIEW_TERMS):
+        return "management_report"
+    if follow_up_mode == "refine_scope":
+        return "scope_refinement"
+    if portfolio_like:
+        return "portfolio_overview"
+    return "metric_snapshot"
 
 
 def iter_keyword_map(section: object) -> list[tuple[str, object]]:
@@ -413,8 +577,10 @@ def extract_metric_code(cfg: dict, question_norm: str) -> tuple[str, str | None]
         if metric_code:
             return metric_code, keyword
 
-    if any(normalize_text(term) in question_norm for term in _BUSINESS_OVERVIEW_TERMS):
-        return "OPERATING_PROFIT", "经营情况"
+    if any(normalize_text(term) in question_norm for term in _BUSINESS_OVERVIEW_TERMS) or any(
+        normalize_text(term) in question_norm for term in ("经营摘要", "经营总览", "管理摘要")
+    ):
+        return "OWNER_PROFIT", "经营情况"
 
     defaults = cfg.get("defaults", {})
     return str(defaults.get("default_metric_code", "TOTAL_INCOME")).strip() or "TOTAL_INCOME", None
@@ -503,7 +669,7 @@ def extract_scope(question: str) -> dict[str, list[str]]:
             if suffix in {"酒店", "公寓"} and not raw_hotel.endswith(suffix):
                 raw_hotel = f"{raw_hotel}{suffix}"
             hotel = clean_hotel_name(raw_hotel)
-            if any(token in hotel for token in ("哪些酒店", "哪些", "本月", "预算", "同比", "经营利润", "总收入", "每房收益", "奢华级酒店", "五星级酒店", "所有酒店", "全部酒店", "整个酒店")):
+            if any(token in hotel for token in ("哪些酒店", "哪些", "本月", "预算", "同比", "经营利润", "总收入", "每房收益", "奢华级酒店", "五星级酒店", "所有酒店", "全部酒店", "整个酒店", "品牌酒店", "品牌")):
                 continue
             if hotel and hotel not in requested_hotels:
                 requested_hotels.append(hotel)
@@ -515,6 +681,23 @@ def extract_scope(question: str) -> dict[str, list[str]]:
     requested_city_levels = match_catalog_entities(question, "city_level") or match_terms(question_norm, _CITY_LEVEL_TERMS)
     requested_departments = match_catalog_entities(question, "department") or match_terms(question_norm, _DEPARTMENT_TERMS)
     requested_accounts = match_catalog_entities(question, "account") or match_terms(question_norm, _ACCOUNT_TERMS)
+    department_norms = {normalize_text(item) for item in requested_departments}
+    requested_accounts = [
+        item
+        for item in requested_accounts
+        if normalize_text(item)
+        not in {
+            normalize_text("汇总"),
+            normalize_text("总览"),
+            normalize_text("摘要"),
+            normalize_text("概览"),
+            normalize_text("利润"),
+            normalize_text("经营利润"),
+            normalize_text("经营情况"),
+            normalize_text("经营状况"),
+        }
+        and normalize_text(item) not in department_norms
+    ]
 
     return {
         "requested_areas": requested_areas,
@@ -546,6 +729,26 @@ def find_hotel_group_token(question: str, scope: dict[str, list[str]]) -> str | 
     return candidate
 
 
+def is_implicit_company_summary_question(question: str, scope: dict[str, list[str]]) -> bool:
+    if any(
+        scope.get(key)
+        for key in (
+            "requested_hotels",
+            "requested_areas",
+            "requested_manage_corps",
+            "requested_brand_children",
+            "requested_builders",
+            "requested_brand_levels",
+            "requested_city_levels",
+        )
+    ):
+        return False
+    question_norm = normalize_text(question)
+    has_summary_word = any(normalize_text(term) in question_norm for term in _PORTFOLIO_TERMS)
+    has_business_context = any(term in question_norm for term in ("经营", "业绩", "收入", "利润", "营收"))
+    return has_summary_word and has_business_context
+
+
 def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str, object] | None:
     token = find_hotel_group_token(question, scope)
     question_norm = normalize_text(question)
@@ -553,6 +756,8 @@ def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str,
     if not token and "酒店" in question and any(term in question_norm for term in company_root_norms) and any(
         normalize_text(term) in question_norm for term in _ALL_SCOPE_TERMS
     ):
+        token = "公司"
+    if not token and is_implicit_company_summary_question(question, scope):
         token = "公司"
     if not token:
         return None
@@ -742,6 +947,173 @@ def detect_group_by_dimensions(question: str) -> list[str]:
     return dimensions
 
 
+def detect_dimension_axes(question: str, result: dict, group_by_dimensions: list[str], follow_up_mode: str | None) -> list[str]:
+    question_norm = normalize_text(question)
+    aliases = load_dimension_aliases()
+    axes: list[str] = []
+
+    def append_unique(value: str) -> None:
+        if value and value not in axes:
+            axes.append(value)
+
+    def question_has(axis: str) -> bool:
+        return any(term in question_norm for term in aliases.get(axis, []))
+
+    if result.get("requested_manage_corps") or question_has("manage_corp"):
+        append_unique("manage_corp")
+
+    if "子品牌" in question or result.get("requested_brand_children"):
+        append_unique("brand_child")
+    if question_has("brand") and "子品牌" not in question:
+        append_unique("brand")
+
+    if result.get("requested_areas") or question_has("area"):
+        append_unique("area")
+
+    if result.get("requested_hotels") or question_has("hotel"):
+        append_unique("hotel")
+
+    if result.get("requested_departments") or result.get("requested_accounts") or question_has("subject_hierarchy"):
+        append_unique("subject_hierarchy")
+
+    if result.get("time_scope_explicit") or _MONTH_IN_QUESTION_RE.search(question) or _YEAR_MONTH_IN_QUESTION_RE.search(question) or question_has("month"):
+        append_unique("month")
+
+    for dimension in group_by_dimensions:
+        if dimension == "manage_corp_area":
+            append_unique("manage_corp")
+            append_unique("area")
+        elif dimension == "brand_child":
+            append_unique("brand_child")
+        else:
+            append_unique(dimension)
+
+    if follow_up_mode == "compare_shift":
+        append_unique("comparison_shift")
+    elif follow_up_mode == "driver":
+        append_unique("driver_focus")
+    elif follow_up_mode == "refine_scope":
+        append_unique("scope_refinement")
+    elif follow_up_mode == "continue":
+        append_unique("context_continuation")
+
+    return axes
+
+
+def build_contract_primary_dimensions(
+    object_type: str,
+    group_by_dimensions: list[str],
+    dimension_axes: list[str],
+) -> list[str]:
+    pseudo_axes = {"comparison_shift", "driver_focus", "scope_refinement", "context_continuation"}
+    primary_dimensions = [axis for axis in dimension_axes if axis not in pseudo_axes]
+    if primary_dimensions:
+        return primary_dimensions
+
+    fallback_map = {
+        "single_hotel": ["hotel"],
+        "hotel_group": ["hotel_group"],
+        "area_scope": ["area"],
+        "manage_corp_scope": ["manage_corp"],
+        "brand_scope": ["brand_child"],
+        "current_scope": ["current_scope"],
+    }
+    if group_by_dimensions:
+        return list(dict.fromkeys(group_by_dimensions))
+    return fallback_map.get(object_type, ["current_scope"])
+
+
+def build_contract_objective_code(analysis_focus: str, analysis_mode: str, follow_up_mode: str | None) -> str:
+    if analysis_focus and analysis_focus != "metric_snapshot":
+        return analysis_focus
+    if follow_up_mode == "compare_shift":
+        return "comparison_shift"
+    if analysis_mode:
+        return analysis_mode
+    return "metric_snapshot"
+
+
+def build_contract_response_shape(analysis_mode: str, query_grain: str, object_type: str, analysis_focus: str) -> str:
+    template_map = {
+        "scope_stat_snapshot": "executive_portfolio",
+        "group_by_dimension_report": "executive_group_dimension",
+        "portfolio_overview": "executive_portfolio",
+        "management_report": "executive_portfolio",
+        "driver_analysis": "executive_hotel_snapshot" if query_grain != "portfolio" and object_type != "hotel_group" else "executive_portfolio",
+        "ranking_overview": "executive_portfolio",
+        "hotel_metric_snapshot": "executive_hotel_snapshot",
+    }
+    if analysis_focus == "pnl_hierarchy":
+        return "executive_hotel_snapshot"
+    return template_map.get(analysis_mode, "executive_hotel_snapshot")
+
+
+def build_contract_comparison_label(compare_mode: str) -> str:
+    mapping = {
+        "actual": "实际口径",
+        "budget": "预算对比",
+        "yoy": "去年同期对比",
+    }
+    return mapping.get(compare_mode, "默认对比")
+
+
+def build_contract_block_sequence(
+    analysis_mode: str,
+    analysis_focus: str,
+    query_grain: str,
+    report_template_code: str,
+) -> list[str]:
+    if analysis_focus == "pnl_hierarchy":
+        return ["scope_overview", "pnl_hierarchy", "driver_breakdown", "follow_up_prompt"]
+    if analysis_mode == "scope_stat_snapshot":
+        return ["scope_overview", "scope_inventory", "stat_summary"]
+    if analysis_mode == "group_by_dimension_report":
+        return [
+            "scope_overview",
+            "dimension_summary",
+            "dimension_breakdown",
+            "income_quality",
+            "room_efficiency",
+            "profit_quality",
+            "cost_efficiency",
+            "horizontal_benchmark",
+            "follow_up_prompt",
+        ]
+    if analysis_mode in {"portfolio_overview", "management_report"}:
+        return [
+            "scope_overview",
+            "portfolio_summary",
+            "income_quality",
+            "room_efficiency",
+            "profit_quality",
+            "cost_efficiency",
+            "horizontal_benchmark",
+            "follow_up_prompt",
+        ]
+    if analysis_mode == "driver_analysis":
+        return [
+            "scope_overview",
+            "driver_summary",
+            "driver_breakdown",
+            "horizontal_benchmark",
+            "follow_up_prompt",
+        ]
+    if analysis_mode == "ranking_overview":
+        return ["scope_overview", "ranking_list", "horizontal_benchmark", "follow_up_prompt"]
+    if analysis_mode == "hotel_metric_snapshot":
+        return [
+            "scope_overview",
+            "hotel_summary",
+            "income_quality",
+            "room_efficiency",
+            "profit_quality",
+            "cost_efficiency",
+            "horizontal_benchmark",
+            "follow_up_prompt",
+        ]
+    return [report_template_code or "analysis_brief", "follow_up_prompt"]
+
+
 def build_query_plan(question: str, result: dict) -> dict[str, object]:
     question_norm = normalize_text(question)
     resolved_entities = result.get("resolved_entities") if isinstance(result.get("resolved_entities"), dict) else build_resolved_entities(question, result)
@@ -756,6 +1128,10 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
     metric_name = _METRIC_LABELS.get(metric_code, metric_code)
     portfolio_like = is_portfolio_question(question_norm)
     group_by_dimensions = detect_group_by_dimensions(question)
+    follow_up_mode = str(result.get("follow_up_mode") or "").strip() or None
+    dimension_axes = detect_dimension_axes(question, result, group_by_dimensions, follow_up_mode)
+    analysis_focus = detect_analysis_focus(question_norm, metric_code, intent, portfolio_like, group_by_dimensions, follow_up_mode, dimension_axes)
+    contextual_step = "inherit_context" if follow_up_mode and isinstance(result.get("conversation_context"), dict) and result.get("conversation_context") else None
 
     if hotel_group:
         object_type = "hotel_group"
@@ -815,7 +1191,39 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         themes = [metric_name, "internal_benchmark"]
         execution_order = ["resolve_scope", "query_metric", "compose_snapshot"]
 
-    fast_steps = {"resolve_scope", "count_entities", "query_metric", "query_ranked_rows", "aggregate_metrics", "compose_stat", "compose_snapshot", "compose_ranking"}
+    bundle_code = "hotel_snapshot"
+    report_template_code = "executive_hotel_snapshot"
+    if analysis_mode == "scope_stat_snapshot":
+        bundle_code = "scope_inventory"
+    elif analysis_mode == "driver_analysis":
+        bundle_code = "operation_overview" if metric_code in {"OWNER_PROFIT", "OPERATING_PROFIT", "TOTAL_INCOME", "ROOM_INCOME", "RESTAURANT_INCOME", "BANQUET_INCOME", "REVPAR"} else "income_overview"
+        report_template_code = "executive_portfolio" if query_grain == "portfolio" else "executive_hotel_snapshot"
+    elif analysis_mode in {"portfolio_overview", "management_report"}:
+        bundle_code = "operation_overview" if metric_code in {"OWNER_PROFIT", "OPERATING_PROFIT"} else "income_overview"
+        report_template_code = "executive_portfolio"
+    elif analysis_mode == "group_by_dimension_report":
+        bundle_code = "group_dimension_overview"
+        report_template_code = "executive_group_dimension"
+    elif metric_code == "TOTAL_INCOME":
+        bundle_code = "income_overview"
+
+    bundles = load_metric_bundles()
+    bundle = bundles.get(bundle_code, {}) if isinstance(bundles.get(bundle_code), dict) else {}
+    bundle_metrics = bundle.get("metrics", [])
+    configured_themes = bundle.get("themes", [])
+    if isinstance(configured_themes, list) and configured_themes:
+        themes = [str(item).strip() for item in configured_themes if str(item).strip()]
+
+    if contextual_step:
+        execution_order = [contextual_step] + execution_order
+
+    primary_dimensions = build_contract_primary_dimensions(object_type, group_by_dimensions, dimension_axes)
+    objective_code = build_contract_objective_code(analysis_focus, analysis_mode, follow_up_mode)
+    response_shape = build_contract_response_shape(analysis_mode, query_grain, object_type, analysis_focus)
+    comparison_label = build_contract_comparison_label(str(result.get("compare_mode") or "actual").strip() or "actual")
+    block_sequence = build_contract_block_sequence(analysis_mode, analysis_focus, query_grain, report_template_code)
+
+    fast_steps = {"resolve_scope", "inherit_context", "count_entities", "query_metric", "query_ranked_rows", "aggregate_metrics", "compose_stat", "compose_snapshot", "compose_ranking"}
     async_steps = {"peer_benchmark", "identify_outliers", "identify_drivers", "compose_explanation", "compose_report", "compose_overview"}
     filters = {
         "areas": areas,
@@ -828,6 +1236,7 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         "departments": list(result.get("requested_departments", [])),
         "accounts": list(result.get("requested_accounts", [])),
     }
+    dimension_signature = " > ".join(dimension_axes) if dimension_axes else None
     query_steps = [
         {
             "step": step,
@@ -848,20 +1257,39 @@ def build_query_plan(question: str, result: dict) -> dict[str, object]:
         "intent": intent,
         "time_scope": result.get("time_scope"),
         "period_type": result.get("period_type"),
-        "metrics": [{"code": metric_code, "name": metric_name}],
+        "metrics": (
+            [{"code": metric_code, "name": _METRIC_LABELS.get(metric_code, metric_name)}]
+            if not isinstance(bundle_metrics, list) or not bundle_metrics
+            else [{"code": str(code), "name": _METRIC_LABELS.get(str(code), str(code))} for code in bundle_metrics]
+        ),
+        "metric_bundle_code": bundle_code,
+        "report_template_code": report_template_code,
         "comparison_mode": result.get("compare_mode"),
         "filters": filters,
         "query_object_type": object_type,
         "query_object_label": object_label,
         "query_grain": query_grain,
         "analysis_mode": analysis_mode,
+        "analysis_focus": analysis_focus,
+        "follow_up_mode": follow_up_mode,
         "group_by_dimensions": group_by_dimensions,
+        "dimension_axes": dimension_axes,
+        "dimension_signature": dimension_signature,
         "themes": themes,
         "execution_order": execution_order,
         "query_steps": query_steps,
         "evidence_needed": list(dict.fromkeys(evidence_needed)),
         "fast_path": [item["step"] for item in query_steps if item["must_be_fast"]],
         "async_path": [item["step"] for item in query_steps if item["can_async"]],
+        "analysis_contract": {
+            "contract_version": "1.1",
+            "objective_code": objective_code,
+            "response_shape": response_shape,
+            "headline_metric": {"code": metric_code, "name": _METRIC_LABELS.get(metric_code, metric_name)},
+            "comparison_label": comparison_label,
+            "primary_dimensions": primary_dimensions,
+            "block_sequence": block_sequence,
+        },
         "resolved_hotel_count": (
             len(hotel_group.get("member_hotels", []))
             if hotel_group
@@ -894,6 +1322,7 @@ def allowed_metrics(cfg: dict) -> list[str]:
     default_metric = str(cfg.get("defaults", {}).get("default_metric_code", "")).strip()
     if default_metric:
         values.add(default_metric)
+    values.add("OWNER_PROFIT")
     values.add("OPERATING_PROFIT")
     for skill in load_skills():
         defaults = skill.get("defaults", {})
@@ -972,7 +1401,7 @@ def call_llm_parse(question: str, time_scope: str, cfg: dict) -> dict | None:
         f"可用业务技能包括 {[skill.get('id') for skill in load_skills()]}，如果命中技能，请严格遵守该技能默认指标和口径。"
         "compare_mode 只能是 actual, budget, yoy。"
         "variance_direction 只能是 below, above, all；未达预算、下滑、低于用 below，高于、增长、超过用 above。"
-        "经营情况、经营状况、经营表现这类宽泛问法，默认 metric_code 用 OPERATING_PROFIT，intent 用 query。"
+        "经营情况、经营状况、经营表现这类宽泛问法，默认 metric_code 用 OWNER_PROFIT（NOP业主净利润），intent 用 query。"
         "收入情况、利润情况、RevPAR情况、怎么样、如何这类问法，如果没有明确同比或预算，compare_mode 默认用 yoy。"
         "你必须按数据结构输出字段：酒店范围 requested_hotels、区域 requested_areas、管理公司 requested_manage_corps、品牌/子品牌 requested_brand_children、建设来源 requested_builders、品牌档次 requested_brand_levels、城市等级 requested_city_levels、部门 requested_departments、科目 requested_accounts、月份 time_scope、指标 metric_code、口径 compare_mode。"
         "酒店名称只保留真实酒店名，不要带“看一下、帮我、3月、经营情况”等修饰词。"
@@ -989,10 +1418,14 @@ def call_llm_parse(question: str, time_scope: str, cfg: dict) -> dict | None:
 def build_rule_parse(payload: Req, cfg: dict) -> dict:
     defaults = cfg.get("defaults", {})
     question_norm = normalize_text(payload.question)
+    context = normalize_context(payload.conversation_context)
+    follow_up_mode = detect_follow_up_mode(question_norm)
     warnings: list[str] = []
     matched_skill = match_skill(question_norm)
     skill_defaults = matched_skill.get("defaults", {}) if isinstance(matched_skill, dict) and isinstance(matched_skill.get("defaults"), dict) else {}
     metric_code, matched_metric_term = extract_metric_code(cfg, question_norm)
+    explicit_metric_code = metric_code
+    explicit_metric_term = matched_metric_term
     intent, matched_intent_term = extract_intent(cfg, question_norm)
     compare_mode, matched_compare_term = extract_compare_mode(cfg, question_norm)
     matched_skill_trigger = matched_skill.get("matched_trigger") if isinstance(matched_skill, dict) else None
@@ -1009,6 +1442,13 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
         if skill_compare and matched_compare_term is None:
             compare_mode = skill_compare
             matched_compare_term = f"skill:{matched_skill.get('id')}"
+    if follow_up_mode == "driver":
+        intent = "explain"
+        if not matched_intent_term:
+            matched_intent_term = "follow_up_driver"
+    if explicit_metric_code == "OPERATING_PROFIT" and normalize_text(str(explicit_metric_term or "")) in {"经营利润", "gop", "operatingprofit"}:
+        metric_code = "OPERATING_PROFIT"
+        matched_metric_term = str(explicit_metric_term)
     if matched_metric_term and is_situation_question(question_norm) and not matched_compare_term:
         compare_mode = "yoy"
         matched_compare_term = "默认去年同期对比"
@@ -1016,10 +1456,77 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
     skill_variance = str(skill_defaults.get("variance_direction", "")).strip()
     if matched_skill and skill_variance in {"below", "above", "all"} and variance_direction == "all":
         variance_direction = skill_variance
-    time_scope = normalize_time_scope(payload.time_scope, defaults, warnings, payload.question)
+    parsed_context_intent = context.get("parsed_intent") if isinstance(context.get("parsed_intent"), dict) else {}
+    parsed_context_query_plan = context.get("query_plan") if isinstance(context.get("query_plan"), dict) else {}
+    parsed_context_metric = ""
+    parsed_context_metrics = parsed_context_query_plan.get("metrics")
+    if isinstance(parsed_context_metrics, list) and parsed_context_metrics:
+        first_metric = parsed_context_metrics[0]
+        if isinstance(first_metric, dict):
+            parsed_context_metric = str(first_metric.get("code") or "").strip()
+    context_metric_code = str(
+        context.get("metric_code")
+        or context.get("last_metric_code")
+        or parsed_context_intent.get("metric_code")
+        or parsed_context_query_plan.get("metric_code")
+        or parsed_context_metric
+        or ""
+    ).strip()
+    context_compare_mode = str(
+        context.get("compare_mode")
+        or context.get("last_compare_mode")
+        or parsed_context_intent.get("compare_mode")
+        or parsed_context_query_plan.get("comparison_mode")
+        or ""
+    ).strip()
+    context_time_scope = str(
+        context.get("time_scope")
+        or context.get("last_time_scope")
+        or parsed_context_intent.get("time_scope")
+        or parsed_context_query_plan.get("time_scope")
+        or ""
+    ).strip()
+    time_scope = normalize_time_scope(payload.time_scope, defaults, warnings, payload.question, seed_time_scope=context_time_scope)
     time_scope_explicit = bool(_YEAR_MONTH_IN_QUESTION_RE.search(payload.question) or _MONTH_IN_QUESTION_RE.search(payload.question))
     period_type = str(skill_defaults.get("period_type") or defaults.get("period_type", "MTD")).strip() or "MTD"
     scope = extract_scope(payload.question)
+    has_explicit_scope = any(
+        scope.get(key)
+        for key in (
+            "requested_areas",
+            "requested_hotels",
+            "requested_manage_corps",
+            "requested_brand_children",
+            "requested_builders",
+            "requested_brand_levels",
+            "requested_city_levels",
+        )
+    )
+    if context and not has_explicit_scope and follow_up_mode:
+        for key in (
+            "requested_areas",
+            "requested_hotels",
+            "requested_manage_corps",
+            "requested_brand_children",
+            "requested_builders",
+            "requested_brand_levels",
+            "requested_city_levels",
+            "requested_departments",
+            "requested_accounts",
+        ):
+            if scope.get(key):
+                continue
+            values = context.get(key)
+            if isinstance(values, list):
+                normalized = [str(item).strip() for item in values if str(item).strip()]
+                if normalized:
+                    scope[key] = normalized
+        if not explicit_metric_term and context_metric_code in allowed_metrics(cfg):
+            metric_code = context_metric_code
+            matched_metric_term = f"context:{context_metric_code}"
+        if not matched_compare_term and context_compare_mode in {"actual", "budget", "yoy"}:
+            compare_mode = context_compare_mode
+            matched_compare_term = f"context:{context_compare_mode}"
     if metric_code == "OPERATING_HOTEL_COUNT":
         scope["requested_hotels"] = []
 
@@ -1049,6 +1556,8 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
         confidence += 0.05
     if matched_skill:
         confidence += 0.08
+    if context:
+        confidence += 0.03
     confidence = min(confidence, 0.98)
 
     return {
@@ -1070,6 +1579,8 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
         "requested_accounts": scope["requested_accounts"],
         "skill_id": matched_skill.get("id") if isinstance(matched_skill, dict) else None,
         "skill_version": matched_skill.get("version") if isinstance(matched_skill, dict) else None,
+        "follow_up_mode": follow_up_mode,
+        "conversation_context": context,
         "matched_terms": {
             "metric": matched_metric_term,
             "intent": matched_intent_term,
@@ -1085,6 +1596,8 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
             "matched_intent": matched_intent_term,
             "matched_skill": matched_skill.get("id") if isinstance(matched_skill, dict) else None,
             "matched_skill_trigger": matched_skill_trigger,
+            "follow_up_mode": follow_up_mode,
+            "context_used": bool(context),
             "fast_model": FAST_LLM_MODEL or None,
         },
         "parse_version": "1.3-rule",
@@ -1100,6 +1613,7 @@ def merge_rule_and_llm(rule_result: dict, llm_result: dict | None, cfg: dict) ->
     llm_intent = str(llm_result.get("intent", "")).strip()
     llm_compare_mode = str(llm_result.get("compare_mode", "")).strip()
     llm_variance_direction = str(llm_result.get("variance_direction", "")).strip()
+    llm_follow_up_mode = str(llm_result.get("follow_up_mode", "")).strip()
     llm_confidence = llm_result.get("confidence")
 
     if llm_metric in allowed_metrics(cfg):
@@ -1111,6 +1625,8 @@ def merge_rule_and_llm(rule_result: dict, llm_result: dict | None, cfg: dict) ->
         merged["compare_mode"] = llm_compare_mode
     if llm_variance_direction in {"below", "above", "all"}:
         merged["variance_direction"] = llm_variance_direction
+    if llm_follow_up_mode in {"driver", "refine_scope", "compare_shift", "continue"}:
+        merged["follow_up_mode"] = llm_follow_up_mode
 
     requested_areas = llm_result.get("requested_areas")
     if isinstance(requested_areas, list) and requested_areas:
@@ -1149,6 +1665,7 @@ def merge_rule_and_llm(rule_result: dict, llm_result: dict | None, cfg: dict) ->
         "llm_metric": llm_metric or None,
         "llm_compare_mode": llm_compare_mode or None,
         "llm_intent": llm_intent or None,
+        "llm_follow_up_mode": llm_follow_up_mode or None,
     }
     merged["parse_version"] = "1.3-fast-llm"
     return merged
@@ -1170,9 +1687,10 @@ def should_clarify(result: dict, question: str) -> bool:
     matched_terms = result.get("matched_terms", {})
     has_compare = bool(matched_terms.get("compare"))
     has_business_overview = bool(matched_terms.get("metric") == "经营情况")
+    context_anchor = has_context_anchor(result)
     generic_prompt = re.search(r"(看一下|帮我分析|帮我看看|讲讲|说说|汇报一下|分析一下)", question_text)
-    generic_without_scope = generic_prompt is not None and not has_scope and not has_business_overview
-    metric_only_prompt = bool(matched_terms.get("metric")) and not has_scope and not has_compare and len(question_text) <= 10
+    generic_without_scope = generic_prompt is not None and not has_scope and not has_business_overview and not context_anchor
+    metric_only_prompt = bool(matched_terms.get("metric")) and not has_scope and not has_compare and len(question_text) <= 10 and not context_anchor
     return generic_without_scope or metric_only_prompt
 
 
@@ -1199,6 +1717,24 @@ def build_clarification_prompt(question: str, result: dict) -> dict:
     }
 
 
+def has_context_anchor(result: dict) -> bool:
+    context = result.get("conversation_context")
+    if not isinstance(context, dict) or not context:
+        return False
+    anchor_keys = (
+        "metric_code",
+        "time_scope",
+        "requested_areas",
+        "requested_hotels",
+        "requested_manage_corps",
+        "requested_brand_children",
+        "requested_builders",
+        "requested_brand_levels",
+        "requested_city_levels",
+    )
+    return any(context.get(key) for key in anchor_keys)
+
+
 @app.post("/api/v1/semantic/parse")
 def parse(payload: Req):
     cfg = load_config()
@@ -1210,6 +1746,8 @@ def parse(payload: Req):
     use_llm = should_use_llm_parse(rule_result, payload.question)
     llm_result = call_llm_parse(payload.question, rule_result["time_scope"], cfg) if use_llm else None
     merged = merge_rule_and_llm(rule_result, llm_result, cfg)
+    if isinstance(payload.conversation_context, dict) and payload.conversation_context:
+        merged["conversation_context"] = payload.conversation_context
     if not use_llm:
         merged = dict(merged)
         merged["parse_debug"] = {

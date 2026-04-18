@@ -134,6 +134,13 @@ test.beforeEach(async ({ page }) => {
         report_markdown: isReport ? "## 结论\n已生成 mock酒店 经营摘要。\n\n## 风险\n暂无重大负向风险。" : undefined,
         data_source: { source: "local_warehouse", warehouse_manifest: { latest_month: "202603" } },
         performance: { total_ms: 188, semantic_ms: 12, db_executor_ms: 60 },
+        trace_events: [
+          { stage: "parse_intent", status: "completed", duration_ms: 12, metadata: { intent: "query", metric_code: "TOTAL_INCOME" } },
+          { stage: "sql_guardrail", status: "completed", duration_ms: 3, metadata: { safe: true } },
+          { stage: "execute_sql", status: "completed", duration_ms: 60, metadata: { row_count: 1 } },
+          { stage: "build_analysis_blocks", status: "completed", duration_ms: 30, metadata: { agent: "analysis_agent", block_count: 3 } },
+          { stage: "build_narrative_brief", status: "completed", duration_ms: 20, metadata: { agent: "narrative_agent", guardrail_status: "passed" } }
+        ],
         warnings: []
       })
     });
@@ -160,12 +167,26 @@ test("发送按钮会返回三段式经营结果", async ({ page }) => {
   await expect(page.getByTestId("recognized-scope").last()).toContainText("mock酒店");
   await expect(page.getByTestId("recognized-scope").last()).toContainText("2026年3月");
   await expect(page.getByTestId("recognized-scope").last()).toContainText("单点快照");
-  await expect(page.getByTestId("executive-overview").last()).toContainText("管理层速览");
+  await expect(page.getByTestId("management-overview").last()).toContainText("已完成 mock酒店");
   await expect(page.getByTestId("internal-benchmark-card").last()).toContainText("同区域同品牌");
   await expect(page.getByTestId("advanced-panel")).toBeVisible();
   await expect(page.getByTestId("details-analysis-sections")).toHaveCount(0);
   await expect(page.getByTestId("details-diagnostics")).toHaveCount(0);
   await expect(page.getByTestId("details-sql-plan")).toHaveCount(0);
+});
+
+test("集团默认管理层视图，可切换调试视图查看技术细节", async ({ page }) => {
+  await page.getByTestId("composer-input").fill("本月哪些酒店经营利润未达预算？");
+  await page.getByTestId("composer-send").click();
+  await waitForAssistantResult(page, 1);
+
+  await expect(page.getByTestId("details-diagnostics")).toHaveCount(0);
+  await page.locator("[data-testid='advanced-panel'] > summary").click();
+  await expect(page.getByTestId("view-mode-toggle")).toHaveText("管理层视图");
+  await page.getByTestId("view-mode-toggle").click();
+  await expect(page.getByTestId("view-mode-toggle")).toHaveText("调试视图");
+  await expect(page.getByTestId("details-diagnostics").last()).toBeVisible();
+  await expect(page.getByTestId("details-sql-plan").last()).toBeVisible();
 });
 
 test("发送后会先展示识别口径和阶段进度", async ({ page }) => {
@@ -200,8 +221,10 @@ test("发送后会先展示识别口径和阶段进度", async ({ page }) => {
 });
 
 test("快捷提问按钮逐个点击都能返回结果", async ({ page }) => {
+  const starterButtons = page.getByTestId("starter-prompts").getByRole("button");
+  await expect(starterButtons).toHaveCount(8);
   for (const index of [0, 1, 2, 3, 4]) {
-    await page.getByTestId(`quick-question-${index}`).click();
+    await starterButtons.nth(index).click();
     await waitForAssistantResult(page, index + 1);
     await expect(page.getByTestId("result-summary").last()).toContainText(/已完成|返回|未查询到|生成/);
   }
@@ -214,10 +237,8 @@ test("继续追问按钮会带着上下文返回新结果", async ({ page }) => 
   await page.getByTestId("composer-send").click();
   await waitForAssistantResult(page, 1);
 
-  await page.locator("[data-testid='follow-up-actions'] summary").last().click();
-  await page.getByTestId("follow-up-0").last().click();
+  await page.getByTestId("follow-up-actions").last().getByRole("button").first().click();
 
-  await expect(page.getByText("已按上下文理解为：").last()).toBeVisible();
   await waitForAssistantResult(page, 2);
   await expect(page.getByTestId("result-summary").last()).toContainText(/完成|返回|分析|原因展开/);
 });
@@ -236,14 +257,13 @@ test("不同连续追问会带不同分析焦点并返回差异化结果", async
   const cases = [
     { label: "继续展开原因", focus: "driver_analysis", summary: "原因展开" },
     { label: "换成经营摘要", focus: "management_report", summary: "经营摘要" },
-    { label: "看同比变化", focus: "yoy_change", summary: "同比变化" },
-    { label: "分析收入结构", focus: "income_structure", summary: "收入结构" },
+    { label: "看去年同期", focus: "yoy_change", summary: "同比变化" },
+    { label: "看收入结构", focus: "income_structure", summary: "收入结构" },
     { label: "看利润和成本效率", focus: "profit_cost_efficiency", summary: "利润与成本效率" },
   ];
 
   for (const item of cases) {
-    await page.locator("[data-testid='follow-up-actions'] summary").last().click();
-    await page.getByRole("button", { name: item.label }).last().click();
+    await page.getByTestId("follow-up-actions").last().getByRole("button", { name: item.label }).first().click();
     await waitForAssistantResult(page);
     expect(submittedPayloads.at(-1)?.context?.analysis_focus).toBe(item.focus);
     await expect(page.getByTestId("result-summary").last()).toContainText(item.summary);
@@ -336,7 +356,7 @@ test("快速筛选会根据问题联想区域酒店月份品牌口径，并能�
           compare_mode: "budget",
           time_scope: "202402",
           requested_brand_children: ["万豪"],
-          query_plan: { query_object_label: "富力体系酒店集合", query_grain: "portfolio", analysis_mode: "portfolio_overview" }
+          query_plan: { query_object_label: "富力体系酒店集合", query_grain: "portfolio", analysis_mode: "portfolio_overview", report_template_code: "executive_portfolio" }
         },
         metric_definition: { name_cn: "经营利润" },
         data_points: [{ hotel_name: "富力体系酒店集合", actual_value: -147636.58, compare_value: 0, diff_value: -147636.58, diff_rate: null }],
@@ -356,13 +376,11 @@ test("快速筛选会根据问题联想区域酒店月份品牌口径，并能�
   await page.getByTestId("composer-send").click();
 
   await waitForAssistantResult(page, 1);
-  await page.locator("[data-testid='follow-up-actions'] summary").last().click();
   await expect(page.getByTestId("quick-filters")).toHaveCount(0);
-  await expect(page.getByTestId("follow-up-0").last()).toHaveText("继续展开原因");
-  await expect(page.getByTestId("follow-up-1").last()).toHaveText("换成经营摘要");
-  await page.getByTestId("follow-up-2").last().click();
+  await expect(page.getByTestId("follow-up-actions").last()).toContainText("继续展开原因");
+  await expect(page.getByTestId("follow-up-actions").last()).toContainText("换成经营摘要");
+  await page.getByTestId("follow-up-actions").last().getByRole("button", { name: "看去年同期" }).first().click();
 
-  await expect(page.getByText("已按上下文理解为：").last()).toBeVisible();
   await waitForAssistantResult(page, 2);
   await expect(page.getByTestId("result-summary").last()).toContainText(/完成|返回|分析/);
 });
@@ -402,10 +420,9 @@ test("单酒店问题会优先展示月份口径归因和摘要类筛选", async
   await page.getByTestId("composer-send").click();
 
   await waitForAssistantResult(page, 1);
-  await page.locator("[data-testid='follow-up-actions'] summary").last().click();
   await expect(page.getByTestId("quick-filters")).toHaveCount(0);
-  await expect(page.getByTestId("follow-up-0").last()).toHaveText("继续展开原因");
-  await expect(page.getByTestId("follow-up-4").last()).toHaveText("看利润和成本效率");
+  await expect(page.getByTestId("follow-up-actions").last()).toContainText("继续展开原因");
+  await expect(page.getByTestId("follow-up-actions").last()).toContainText("看利润和成本效率");
 });
 
 test("区域问题会优先展示下钻酒店切品牌切月份和摘要类筛选", async ({ page }) => {
@@ -446,10 +463,9 @@ test("区域问题会优先展示下钻酒店切品牌切月份和摘要类筛�
   await page.getByTestId("composer-send").click();
 
   await waitForAssistantResult(page, 1);
-  await page.locator("[data-testid='follow-up-actions'] summary").last().click();
   await expect(page.getByTestId("quick-filters")).toHaveCount(0);
-  await expect(page.getByTestId("follow-up-0").last()).toHaveText("继续展开原因");
-  await expect(page.getByTestId("follow-up-3").last()).toHaveText("分析收入结构");
+  await expect(page.getByTestId("follow-up-actions").last()).toContainText("继续展开原因");
+  await expect(page.getByTestId("follow-up-actions").last()).toContainText("看收入结构");
 });
 
 test("集团管理层保留业务设置，非集团角色仍可通过角色视角看到调优配置", async ({ page }) => {
@@ -457,6 +473,7 @@ test("集团管理层保留业务设置，非集团角色仍可通过角色视�
   await page.locator("[data-testid='advanced-panel'] > summary").click();
   await expect(page.getByTestId("action-mode-select")).toBeVisible();
   await expect(page.getByTestId("time-scope-input")).toBeVisible();
+  await expect(page.getByTestId("view-mode-toggle")).toHaveText("管理层视图");
   await expect(page.getByTestId("external-benchmark-toggle")).toBeVisible();
   await expect(page.getByTestId("role-select")).toHaveCount(0);
   await expect(page.getByTestId("system-config-panel")).toHaveCount(0);
@@ -496,6 +513,11 @@ test("非集团角色仍可展开查看结构化和技术详情", async ({ page 
     await expect(page.locator(`[data-testid='${testId}'][open]`)).toBeVisible();
     await expect(page.locator(`[data-testid='${testId}'] pre`)).not.toBeEmpty();
   }
+
+  await page.locator("[data-testid='details-diagnostics'] summary").click();
+  await expect(page.getByTestId("trace-events-summary")).toContainText("语义理解");
+  await expect(page.getByTestId("trace-events-summary")).toContainText("叙事生成");
+  await expect(page.getByTestId("trace-events-summary")).toContainText("Guardrail：passed");
 });
 
 test("组合总览问题会优先展示组合口径和组合内重点酒店", async ({ page }) => {
@@ -517,8 +539,8 @@ test("组合总览问题会优先展示组合口径和组合内重点酒店", as
         data_points: [{ hotel_name: "富力体系酒店集合", actual_value: -147636.58, compare_value: 0, diff_value: -147636.58, diff_rate: null }],
         portfolio_member_count: 7,
         portfolio_breakdown: [
-          { hotel_name: "广州富力丽思卡尔顿酒店及公寓", actual_value: 500000, compare_value: 420000, diff_value: 80000, diff_rate: 0.19 },
-          { hotel_name: "镇江富力喜来登酒店", actual_value: 280000, compare_value: 360000, diff_value: -80000, diff_rate: -0.22 }
+          { hotel_name: "广州富力丽思卡尔顿酒店及公寓", actual_value: 500000, total_income_actual: 500000, owner_profit_actual: 90000, operating_profit_actual: 260000, revpar_actual: 680, compare_value: 420000, diff_value: 80000, diff_rate: 0.19 },
+          { hotel_name: "镇江富力喜来登酒店", actual_value: 280000, total_income_actual: 280000, owner_profit_actual: -120000, operating_profit_actual: -80000, revpar_actual: 320, compare_value: 360000, diff_value: -80000, diff_rate: -0.22 }
         ],
         portfolio_outliers: {
           income: {
@@ -533,6 +555,10 @@ test("组合总览问题会优先展示组合口径和组合内重点酒店", as
             worst: { hotel_name: "镇江富力喜来登酒店", people_cost_actual: 180000 }
           }
         },
+        report_sections: [
+          { title: "分析范围", content: "组合总览" },
+          { title: "重点酒店与梯队", content: "1. 广州富力丽思卡尔顿酒店及公寓 总收入 500,000；2. 镇江富力喜来登酒店 总收入 280,000。1. 广州富力丽思卡尔顿酒店及公寓 NOP业主净利润 90,000；2. 镇江富力喜来登酒店 NOP业主净利润 -120,000。0-200万 1 家，合计 NOP业主净利润 90,000；亏损 1 家，合计 NOP业主净利润 -120,000。" }
+        ],
         explanation: { report_sections: [{ title: "分析范围", content: "组合总览" }] },
         data_source: { source: "local_warehouse", warehouse_manifest: { latest_month: "202603" } },
         performance: { total_ms: 260 },
@@ -549,6 +575,8 @@ test("组合总览问题会优先展示组合口径和组合内重点酒店", as
   await expect(page.getByTestId("recognized-scope").last()).toContainText("组合总览");
   await expect(page.getByTestId("primary-metric-strip").last()).toContainText("7");
   await expect(page.getByTestId("top-data-points").last()).toContainText("广州富力丽思卡尔顿酒店及公寓");
+  await expect(page.getByTestId("portfolio-watchlist-table").last()).toContainText("NOP业主净利润");
+  await expect(page.getByTestId("portfolio-watchlist-table").last()).toContainText("NOP业主净利润梯队");
   await expect(page.getByTestId("portfolio-outliers").last()).toContainText("收入拉动");
   await expect(page.getByTestId("portfolio-outliers").last()).toContainText("镇江富力喜来登酒店");
 });

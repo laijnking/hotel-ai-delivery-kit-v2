@@ -580,3 +580,96 @@ test("组合总览问题会优先展示组合口径和组合内重点酒店", as
   await expect(page.getByTestId("portfolio-outliers").last()).toContainText("收入拉动");
   await expect(page.getByTestId("portfolio-outliers").last()).toContainText("镇江富力喜来登酒店");
 });
+
+test("explanation 章节中的指标和排行会结构化展示", async ({ page }) => {
+  await page.route("**/api/v1/ai/query", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        trace_id: "trace_structured_sections",
+        summary: "已按万达品牌完成分维度经营拆解。",
+        parsed_intent: {
+          intent: "query",
+          metric_code: "OWNER_PROFIT",
+          compare_mode: "yoy",
+          time_scope: "202603",
+          query_plan: {
+            query_object_label: "万达品牌",
+            query_grain: "portfolio",
+            analysis_mode: "group_by_dimension_report",
+            report_template_code: "executive_group_dimension"
+          }
+        },
+        metric_definition: { name_cn: "NOP业主净利润" },
+        data_points: [{ hotel_name: "万达品牌", actual_value: -100000, compare_value: 0, diff_value: -100000, diff_rate: -0.1 }],
+        portfolio_member_count: 5,
+        portfolio_breakdown: [
+          { hotel_name: "内江嘉华", total_income_actual: 2762981.25, owner_profit_actual: 33061.46, operating_profit_actual: 155301.59, revpar_actual: 171.86, diff_value: 31480.73 },
+          { hotel_name: "太原文华", total_income_actual: 2254909.25, owner_profit_actual: -397444.53, operating_profit_actual: -338219.09, revpar_actual: 90.07, diff_value: -398952.29 }
+        ],
+        explanation: {
+          report_sections: [
+            { title: "成本效率", content: "人工成本 119,616,730.44（占收入 34.2%）；能源费用 33,888,512.83（占收入 9.7%）；餐饮成本 88,415,077.66（占收入 25.3%）；客房成本 56,109,977.62（占收入 16.1%）；行政费用 80,909,875.62（占收入 23.2%）。" },
+            { title: "重点酒店与梯队", content: "1. 内江嘉华 总收入 2,762,981.25；2. 太原文华 总收入 2,254,909.25。1. 内江嘉华 NOP业主净利润 33,061.46；2. 太原文华 NOP业主净利润 -397,444.53。0-200万 1 家，合计 NOP业主净利润 33,061.46；亏损 1 家，合计 NOP业主净利润 -397,444.53。" }
+          ]
+        },
+        data_source: { source: "local_warehouse", warehouse_manifest: { latest_month: "202603" } },
+        performance: { total_ms: 260 },
+        warnings: []
+      })
+    });
+  });
+
+  await page.getByTestId("composer-input").fill("请分析一下万达所有酒店3月份经营情况，按区域维度输出");
+  await page.getByTestId("composer-send").click();
+
+  await waitForAssistantResult(page, 1);
+  await expect(page.getByTestId("section-成本效率").last().getByTestId("structured-section-table")).toContainText("指标明细");
+  await expect(page.getByTestId("section-成本效率").last().getByTestId("structured-section-table")).toContainText("人工成本");
+  await expect(page.getByTestId("portfolio-watchlist-table").last()).toContainText("总收入");
+  await expect(page.getByTestId("portfolio-watchlist-table").last()).toContainText("NOP业主净利润梯队");
+});
+
+test("analysis blocks 中的指标串会结构化展示", async ({ page }) => {
+  await page.route("**/api/v1/ai/query", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        trace_id: "trace_structured_blocks",
+        summary: "已按万达品牌完成分维度经营拆解。",
+        parsed_intent: {
+          intent: "query",
+          metric_code: "OWNER_PROFIT",
+          compare_mode: "yoy",
+          time_scope: "202603",
+          query_plan: {
+            query_object_label: "万达品牌",
+            query_grain: "portfolio",
+            analysis_mode: "group_by_dimension_report",
+            report_template_code: "executive_group_dimension"
+          }
+        },
+        metric_definition: { name_cn: "NOP业主净利润" },
+        data_points: [{ hotel_name: "万达品牌", actual_value: -100000, compare_value: 0, diff_value: -100000, diff_rate: -0.1 }],
+        analysis_blocks: [
+          {
+            title: "成本效率",
+            narrative: "人工成本 119,616,730.44（占收入 34.2%）；能源费用 33,888,512.83（占收入 9.7%）；餐饮成本 88,415,077.66（占收入 25.3%）；客房成本 56,109,977.62（占收入 16.1%）；行政费用 80,909,875.62（占收入 23.2%）。"
+          }
+        ],
+        data_source: { source: "local_warehouse", warehouse_manifest: { latest_month: "202603" } },
+        performance: { total_ms: 260 },
+        warnings: []
+      })
+    });
+  });
+
+  await page.getByTestId("composer-input").fill("请分析一下万达所有酒店3月份经营情况，按区域维度输出");
+  await page.getByTestId("composer-send").click();
+
+  await waitForAssistantResult(page, 1);
+  await expect(page.getByTestId("analysis-blocks").last().getByTestId("structured-section-table")).toContainText("指标明细");
+  await expect(page.getByTestId("analysis-blocks").last().getByTestId("structured-section-table")).toContainText("人工成本");
+});

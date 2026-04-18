@@ -86,6 +86,12 @@ type SectionTierRow = {
   value: string;
 };
 
+type SectionValueRow = {
+  metric: string;
+  value: string;
+  note: string | null;
+};
+
 const ROLE_OPTIONS: Array<{ value: Role; label: string }> = [
   { value: "GROUP_ADMIN", label: "集团管理层" },
   { value: "AREA_MANAGER", label: "区域经理" },
@@ -353,8 +359,12 @@ function parseDisplayNumber(value: string) {
 const SECTION_METRIC_LABELS = [
   "NOP业主净利润",
   "餐饮/宴会收入",
+  "能源费用",
   "经营利润",
+  "餐饮成本",
   "人工成本",
+  "客房成本",
+  "行政费用",
   "客房收入",
   "总收入",
   "RevPAR",
@@ -369,30 +379,71 @@ const SECTION_METRIC_PATTERN = new RegExp(
   `^(?:(\\d+)[\\.、]\\s*)?(.+?)\\s+(${SECTION_METRIC_LABELS.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s+(-?[\\d,]+(?:\\.\\d+)?%?)$`,
 );
 
+const SECTION_RANKING_PATTERN = new RegExp(
+  `(?:^|[；。\\n]\\s*)(?:(\\d+)[\\.、]\\s*)?([^；。\\n]+?)\\s+(${SECTION_METRIC_LABELS.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s+(-?[\\d,]+(?:\\.\\d+)?%?)`,
+  "g",
+);
+
+const SECTION_VALUE_PATTERN = new RegExp(
+  `^(${SECTION_METRIC_LABELS.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s+(-?[\\d,]+(?:\\.\\d+)?%?)(?:（([^）]+)）)?$`,
+);
+
 function parseSectionMetricGroups(content: unknown): SectionMetricGroup[] {
   const text = String(content || "").trim();
   if (!text) return [];
   const groups = new Map<string, SectionMetricRow[]>();
-  text
-    .split(/[；。\n]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .forEach((segment) => {
-      const match = segment.match(SECTION_METRIC_PATTERN);
-      if (!match) return;
-      const [, rank, dimension, metric, value] = match;
-      const rows = groups.get(metric) || [];
-      rows.push({
-        rank: rank ? Number(rank) : rows.length + 1,
-        dimension: dimension.trim(),
-        metric,
-        value,
-      });
-      groups.set(metric, rows);
+  for (const match of text.matchAll(SECTION_RANKING_PATTERN)) {
+    const [, rank, dimension, metric, value] = match;
+    const rows = groups.get(metric) || [];
+    const cleanDimension = dimension.trim();
+    if (!cleanDimension || SECTION_METRIC_LABELS.includes(cleanDimension)) continue;
+    rows.push({
+      rank: rank ? Number(rank) : rows.length + 1,
+      dimension: cleanDimension,
+      metric,
+      value,
     });
+    groups.set(metric, rows);
+  }
+  if (!groups.size) {
+    text
+      .split(/[；。\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((segment) => {
+        const match = segment.match(SECTION_METRIC_PATTERN);
+        if (!match) return;
+        const [, rank, dimension, metric, value] = match;
+        const rows = groups.get(metric) || [];
+        rows.push({
+          rank: rank ? Number(rank) : rows.length + 1,
+          dimension: dimension.trim(),
+          metric,
+          value,
+        });
+        groups.set(metric, rows);
+      });
+  }
   return Array.from(groups.entries())
     .map(([metric, rows]) => ({ metric, rows }))
     .filter((group) => group.rows.length >= 2);
+}
+
+function parseSectionValueRows(content: unknown): SectionValueRow[] {
+  const text = String(content || "").trim();
+  if (!text) return [];
+  const rows = text
+    .split(/[；。\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      const match = segment.match(SECTION_VALUE_PATTERN);
+      if (!match) return null;
+      const [, metric, value, note] = match;
+      return { metric, value, note: note || null };
+    })
+    .filter(Boolean) as SectionValueRow[];
+  return rows.length >= 2 ? rows : [];
 }
 
 function parseSectionTierRows(content: unknown): SectionTierRow[] {
@@ -1208,10 +1259,41 @@ function ExternalBenchmarkCard({ benchmark }: { benchmark: any }) {
   );
 }
 
-function SectionMetricTables({ groups, tierRows }: { groups: SectionMetricGroup[]; tierRows: SectionTierRow[] }) {
-  if (!groups.length && !tierRows.length) return null;
+function SectionMetricTables({
+  groups,
+  tierRows,
+  valueRows = [],
+}: {
+  groups: SectionMetricGroup[];
+  tierRows: SectionTierRow[];
+  valueRows?: SectionValueRow[];
+}) {
+  if (!groups.length && !tierRows.length && !valueRows.length) return null;
   return (
     <div className="structured-section" data-testid="structured-section-table">
+      {valueRows.length ? (
+        <div className="structured-table-card structured-table-card--wide">
+          <div className="structured-table-title">指标明细</div>
+          <table className="structured-table">
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>数据</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              {valueRows.map((row) => (
+                <tr key={`${row.metric}-${row.value}`}>
+                  <td>{row.metric}</td>
+                  <td className={parseDisplayNumber(row.value) !== null && Number(parseDisplayNumber(row.value)) < 0 ? "negative-number" : ""}>{row.value}</td>
+                  <td>{row.note || "当前口径"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
       {groups.length ? (
         <div className="structured-table-grid">
           {groups.map((group) => (
@@ -1370,10 +1452,11 @@ function StructuredSectionContent({
   }
   const metricGroups = parseSectionMetricGroups(content);
   const tierRows = parseSectionTierRows(content);
-  if (metricGroups.length || tierRows.length) {
+  const valueRows = parseSectionValueRows(content);
+  if (metricGroups.length || tierRows.length || valueRows.length) {
     return (
       <>
-        <SectionMetricTables groups={metricGroups} tierRows={tierRows} />
+        <SectionMetricTables groups={metricGroups} tierRows={tierRows} valueRows={valueRows} />
         <details className="structured-section-source">
           <summary>查看原始表述</summary>
           <div className="leadership-section-content">{content}</div>
@@ -1487,7 +1570,15 @@ function PromptBank({
   );
 }
 
-function AnalysisBlocksPanel({ blocks }: { blocks: any[] }) {
+function AnalysisBlocksPanel({
+  blocks,
+  rows,
+  outlierItems,
+}: {
+  blocks: any[];
+  rows: any[];
+  outlierItems: any[];
+}) {
   if (!blocks.length) return null;
   return (
     <div className="result-block analysis-block-section" data-testid="analysis-blocks">
@@ -1509,7 +1600,11 @@ function AnalysisBlocksPanel({ blocks }: { blocks: any[] }) {
                   {block?.tag ? <span className="analysis-block-pill">{String(block.tag)}</span> : null}
                 </div>
               </div>
-              {narrative ? <div className="analysis-block-summary">{narrative}</div> : null}
+              {narrative ? (
+                <div className="analysis-block-summary">
+                  <StructuredSectionContent section={{ title, content: narrative }} rows={rows} outlierItems={outlierItems} />
+                </div>
+              ) : null}
               {tags.length ? (
                 <div className="analysis-block-tags">
                   {tags.map((item: string) => (
@@ -1781,7 +1876,7 @@ function ResultCard({
         <div className="result-briefing-text">{templateLeadLine}</div>
       </div>
 
-      {hasAnalysisBlocks ? <AnalysisBlocksPanel blocks={analysisBlocks} /> : null}
+      {hasAnalysisBlocks ? <AnalysisBlocksPanel blocks={analysisBlocks} rows={displayRows} outlierItems={portfolioOutlierItems} /> : null}
 
       {false ? <div className="result-block" data-testid="management-observation">
         <div className="result-block-title">ç»è¥è§‚å¯Ÿ</div>
@@ -1970,7 +2065,7 @@ function ResultCard({
             {sections.map((section: any, index: number) => (
               <div className="mobile-section-card" key={`${section.title}-${index}`} data-testid={`section-${section.title}`}>
                 <div className="mobile-section-title">{section.title}</div>
-                <div className="mobile-section-content">{section.content}</div>
+                <StructuredSectionContent section={section} rows={displayRows} outlierItems={portfolioOutlierItems} />
               </div>
             ))}
           </div>

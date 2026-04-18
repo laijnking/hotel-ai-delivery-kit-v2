@@ -108,12 +108,12 @@ const VIEW_MODE_OPTIONS: Array<{ value: ViewMode; label: string; helper: string 
   { value: "debug", label: "调试视图", helper: "显示 Trace、SQL、权限范围、结构化数据和系统配置。" }
 ];
 
-const DEFAULT_QUESTION = "汇总一下本月所以酒店的经营情况";
+const DEFAULT_QUESTION = "汇总一下本月所有酒店的经营情况";
 const DEFAULT_ROLE: Role = "GROUP_ADMIN";
 const ROLE_STORAGE_KEY = "hotel-ai-role";
 const BASE_FOLLOW_UP_SUGGESTIONS = ["继续展开原因", "换成经营摘要", "看去年同期", "看收入结构", "看利润和成本效率"];
 const FALLBACK_QUICK_QUESTIONS = [
-  "汇总一下本月所以酒店的经营情况",
+  "汇总一下本月所有酒店的经营情况",
   "广州丽思卡尔顿酒店3月的收入情况怎么样？",
   "看一下江门嘉华酒店3月的经营情况",
   "本月总收入同比如何？",

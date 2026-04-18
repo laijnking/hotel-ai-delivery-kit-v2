@@ -1,16 +1,51 @@
 # 部署说明
 
 ## 当前部署模式
-- 单机 docker-compose
-- 适合本地开发、测试、演示
-- Linux 本地无 Docker 时，可使用 `tmux + scripts/start_local.sh` 托管启动。
+- 单机 Docker Compose 或 `tmux + scripts/start_local.sh`。
+- Docker Compose 适合服务器部署、迁移复用和后续多应用共存。
+- `tmux + scripts/start_local.sh` 适合快速本机调试、无 Docker 环境或临时排障。
+
+## Docker Compose 部署
+
+首次部署：
+
+```bash
+cd /root/project/HotelAgent/hotel-ai-delivery-kit-v2
+cp backend/.env.example backend/.env  # 如需接入大模型或外部服务，可在该文件补充密钥
+docker compose up -d --build
+```
+
+查看状态与日志：
+
+```bash
+docker compose ps
+docker compose logs -f --tail=100 frontend ai-query-service
+```
+
+停止 Docker 部署：
+
+```bash
+docker compose down
+```
+
+Docker 部署端口：
+
+- 前端：宿主机 `0.0.0.0:3000`
+- 后端入口：宿主机 `127.0.0.1:8100`，供本机 smoke check 或前端容器代理使用
+- 内部微服务：仅在 Compose 网络中互通，不对公网暴露
+
+容器内服务发现：
+
+- `ai-query-service` 通过 `AUTH_SERVICE_URL=http://auth-service:8105` 等服务名访问内部微服务。
+- 前端 Vite 代理通过 `VITE_PROXY_TARGET=http://ai-query-service:8100` 转发同源 `/api`。
+- 本机非 Docker 启动仍默认代理到 `http://127.0.0.1:8100`。
 
 ## 外网访问部署
 
-当前前端与后端入口均以 `0.0.0.0` 监听：
+当前对公网建议只暴露前端：
 
 - 前端：`3000`
-- 后端入口：`8100`
+- 后端入口：Docker 模式下绑定 `127.0.0.1:8100`；本机脚本模式下监听 `0.0.0.0:8100`
 - 内部微服务：`8101-8107`
 
 公网访问建议：

@@ -59,6 +59,34 @@ tmux kill-session -t hotel-agent
 - 后端入口：`0.0.0.0:8100`
 - 内部后端服务：`8101-8107`
 
+## Linux Docker Compose 启动
+
+服务器部署或需要和其他应用统一托管时，推荐 Docker Compose：
+
+```bash
+cd /root/project/HotelAgent/hotel-ai-delivery-kit-v2
+cp backend/.env.example backend/.env
+docker compose up -d --build
+```
+
+验证：
+
+```bash
+docker compose ps
+curl -I http://127.0.0.1:3000
+curl -X POST http://127.0.0.1:3000/api/v1/ai/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"请分析一下万达所有酒店3月份经营情况，按区域维度输出","role":"GROUP_ADMIN"}'
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+Docker 模式下，浏览器仍只访问 `3000`；前端容器会把 `/api` 代理到 Compose 网络里的 `ai-query-service:8100`。
+
 ## 外网访问
 
 如果部署机器有公网 IP，且安全组/防火墙已放行端口，可以直接访问：

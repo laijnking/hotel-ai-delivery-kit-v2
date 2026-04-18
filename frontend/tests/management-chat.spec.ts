@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }) => {
       contentType: "application/json",
       body: JSON.stringify({
         quick_questions: [
-          "本月哪些酒店经营利润未达预算？",
+          "汇总一下本月所以酒店的经营情况",
           "广州丽思卡尔顿酒店3月的收入情况怎么样？",
           "看一下江门嘉华酒店3月的经营情况",
           "本月总收入同比如何？",
@@ -176,6 +176,7 @@ test("发送按钮会返回三段式经营结果", async ({ page }) => {
 });
 
 test("集团默认管理层视图，可切换调试视图查看技术细节", async ({ page }) => {
+  await expect(page.getByTestId("composer-input")).toHaveValue("汇总一下本月所以酒店的经营情况");
   await page.getByTestId("composer-input").fill("本月哪些酒店经营利润未达预算？");
   await page.getByTestId("composer-send").click();
   await waitForAssistantResult(page, 1);

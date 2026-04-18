@@ -1098,7 +1098,6 @@ SELECT
 FROM {query_parts["from_clause"]}
 WHERE {" AND ".join(where_clauses)}
 {order_clause}
-LIMIT 50
 '''.strip()
 
 
@@ -1201,7 +1200,7 @@ def build_portfolio_sql(
 SELECT
   {sql_literal(object_label)} AS hotel_name,
   {sql_literal(str((parsed.get("query_plan") or {}).get("query_object_type") or "portfolio"))} AS area,
-  COUNT(*) AS portfolio_member_count,
+  COUNT(DISTINCT TRIM({query_parts["hotel_select"]})) AS portfolio_member_count,
   {metric_select_sql},
   SUM({actual_field}) AS actual_value,
   SUM({compare_field}) AS compare_value,
@@ -2226,6 +2225,48 @@ def build_trace_events(
     return events
 
 
+def expected_portfolio_member_count(parsed: dict) -> int:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    try:
+        planned_count = int(query_plan.get("resolved_hotel_count") or 0)
+    except (TypeError, ValueError):
+        planned_count = 0
+    if planned_count > 0:
+        return planned_count
+
+    resolved_entities = parsed.get("resolved_entities") if isinstance(parsed.get("resolved_entities"), dict) else {}
+    for key in ("hotel_group", "scope_collection"):
+        entity = resolved_entities.get(key) if isinstance(resolved_entities.get(key), dict) else {}
+        try:
+            member_count = int(entity.get("member_count") or 0)
+        except (TypeError, ValueError):
+            member_count = 0
+        if member_count > 0:
+            return member_count
+    return 0
+
+
+def incomplete_portfolio_quality(parsed: dict, rows: list[dict]) -> dict[str, object] | None:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    if query_plan.get("query_grain") != "portfolio":
+        return None
+    expected_count = expected_portfolio_member_count(parsed)
+    if expected_count <= 0 or not rows or not isinstance(rows[0], dict):
+        return None
+    try:
+        actual_count = int(rows[0].get("portfolio_member_count") or 0)
+    except (TypeError, ValueError):
+        actual_count = 0
+    if actual_count == expected_count:
+        return None
+    return {
+        "status": "mismatch",
+        "expected_hotel_count": expected_count,
+        "actual_hotel_count": actual_count,
+        "policy": "suppress_incomplete_aggregate",
+    }
+
+
 @app.post("/api/v1/ai/query")
 def ai_query(payload: QueryRequest):
     request_started = time.perf_counter()
@@ -2389,7 +2430,61 @@ def ai_query(payload: QueryRequest):
         first_portfolio_row = rows[0] if isinstance(rows[0], dict) else {}
         if int(first_portfolio_row.get("portfolio_member_count") or 0) <= 0:
             rows = []
+    data_quality = incomplete_portfolio_quality(parsed, rows)
+    if data_quality:
+        expected_count = int(data_quality["expected_hotel_count"])
+        actual_count = int(data_quality["actual_hotel_count"])
+        warnings.append("data_incomplete_suppressed")
+        summary = (
+            f"当前数据完整性未通过：应覆盖 {expected_count} 家酒店，当前账期取到 {actual_count} 家。"
+            "为避免错误汇总，已停止展示经营汇总。"
+        )
+        explanation_payload = {
+            "summary": summary,
+            "management_summary": [summary],
+            "risks": ["数据完整性未通过校验，本次不展示经营指标、排名或汇总数。"],
+            "suggestions": ["请先核对本月数据同步范围，再重新发起全量汇总。"],
+            "report_sections": [{"title": "数据完整性", "content": summary}],
+        }
+        timings["explanation_ms"] = 0
+        timings["audit_ms"] = 0
+        timings["total_ms"] = elapsed_ms(request_started)
+        trace_events = build_trace_events(
+            timings=timings,
+            parsed=parsed,
+            sql_plan=sql_plan,
+            explanation_payload=explanation_payload,
+            warnings=warnings,
+        )
+        return {
+            "trace_id": trace_id,
+            "summary": summary,
+            "narrative_brief": summary,
+            "analysis_blocks": _analysis_blocks_from_explanation(explanation_payload, summary),
+            "trace_events": trace_events,
+            "parsed_intent": parsed,
+            "metric_definition": metric_def,
+            "sql_plan": sql_plan,
+            "auth_scope": auth_scope,
+            "data_source": data_source,
+            "data_points": [],
+            "portfolio_member_count": None,
+            "portfolio_breakdown": [],
+            "portfolio_outliers": None,
+            "dimension_breakdowns": {},
+            "query_route": query_route,
+            "quick_filters": [],
+            "follow_up_prompts": [],
+            "internal_benchmark": None,
+            "external_benchmark": None,
+            "external_benchmark_requested": payload.context.external_benchmark,
+            "explanation": explanation_payload,
+            "data_quality": data_quality,
+            "warnings": warnings,
+            "performance": timings,
+        }
     row_count = len(rows)
+    data_quality = {"status": "complete"} if query_route.startswith("portfolio") else {"status": "not_applicable"}
     internal_benchmark = None
     portfolio_breakdown: list[dict] = []
     portfolio_outliers: dict[str, dict[str, object]] | None = None
@@ -2570,6 +2665,7 @@ def ai_query(payload: QueryRequest):
         "external_benchmark": external_benchmark,
         "external_benchmark_requested": payload.context.external_benchmark,
         "explanation": explanation_payload,
+        "data_quality": data_quality,
         "warnings": warnings,
         "performance": timings,
     }

@@ -719,6 +719,8 @@ def find_hotel_group_token(question: str, scope: dict[str, list[str]]) -> str | 
     if not match:
         return None
     candidate = clean_hotel_name(match.group(1))
+    candidate = re.sub(r"^(?:汇总一下|总结一下|统计一下|查一下|看一下|看下|分析一下|了解一下|帮我|请|麻烦)", "", candidate).strip()
+    candidate = re.sub(r"^(?:本月|这个月|当月|本年|今年|当前)", "", candidate).strip()
     candidate = re.sub(r"^(?:20\d{2}年)?\d{1,2}月(?:份)?", "", candidate).strip()
     candidate = re.sub(r"(?:查一下|看一下|看下|分析一下|了解一下|帮我|请|麻烦)$", "", candidate).strip()
     candidate = re.sub(r"的$", "", candidate).strip()
@@ -753,9 +755,13 @@ def resolve_hotel_group(question: str, scope: dict[str, list[str]]) -> dict[str,
     token = find_hotel_group_token(question, scope)
     question_norm = normalize_text(question)
     company_root_norms = {normalize_text(term) for term in _COMPANY_ROOT_TERMS}
+    all_hotel_scope_requested = "酒店" in question and any(normalize_text(term) in question_norm for term in _ALL_SCOPE_TERMS)
+    has_business_context = any(term in question_norm for term in ("经营", "业绩", "收入", "利润", "营收"))
     if not token and "酒店" in question and any(term in question_norm for term in company_root_norms) and any(
         normalize_text(term) in question_norm for term in _ALL_SCOPE_TERMS
     ):
+        token = "公司"
+    if not token and all_hotel_scope_requested and has_business_context:
         token = "公司"
     if not token and is_implicit_company_summary_question(question, scope):
         token = "公司"

@@ -943,6 +943,7 @@ function getDisplayRows(result: any) {
 }
 
 function getPortfolioMemberCount(result: any) {
+  if (["incomplete", "mismatch"].includes(String(result?.data_quality?.status || ""))) return null;
   const directCount = result?.portfolio_member_count;
   if (typeof directCount === "number" && !Number.isNaN(directCount)) return directCount;
   const firstPoint = Array.isArray(result?.data_points) && result.data_points.length ? result.data_points[0] : null;

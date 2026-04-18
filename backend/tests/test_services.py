@@ -303,6 +303,17 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertFalse(result["resolved_entities"]["hotel_group"]["use_group_token_as_filter"])
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_treats_all_hotels_summary_as_company_portfolio(self):
+        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+            result = semantic_main.parse(
+                semantic_main.Req(question="汇总一下本月所有酒店的经营情况", time_scope="202603")
+            )
+        self.assertEqual(result["query_plan"]["query_object_type"], "hotel_group")
+        self.assertEqual(result["query_plan"]["query_object_label"], "公司全部酒店")
+        self.assertEqual(result["query_plan"]["query_grain"], "portfolio")
+        self.assertEqual(result["resolved_entities"]["hotel_group"]["resolution_basis"], "company_root_all_hotels")
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_recognizes_operating_hotel_count_metric(self):
         with patch.object(semantic_main, "call_llm_parse", return_value=None):
             result = semantic_main.parse(
@@ -457,6 +468,7 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertIn("s.area IN ('华南区')", sql)
         self.assertIn("CONCAT_WS('|'", sql)
         self.assertIn("LIKE", sql)
+        self.assertNotIn("LIMIT 50", sql)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_sql_uses_metric_bundle_for_hotel_snapshot_fields(self):
@@ -859,7 +871,7 @@ class ServiceSmokeTests(unittest.TestCase):
             requested_hotels=["广州富力丽思卡尔顿酒店及公寓", "香水湾富力万豪度假酒店", "富力"],
         )
         self.assertIn("'富力体系酒店集合' AS hotel_name", sql)
-        self.assertIn("COUNT(*) AS portfolio_member_count", sql)
+        self.assertIn("COUNT(DISTINCT TRIM(COALESCE(s.hotel_name_s, o.hotel_name))) AS portfolio_member_count", sql)
         self.assertIn("SUM(o.TOTAL_INCOME_MTD_A) AS total_income_actual", sql)
         self.assertIn("SUM(o.OPERATING_PROFIT_MTD_A) AS actual_value", sql)
         self.assertIn("LIKE '%富力%'", sql)
@@ -1839,6 +1851,48 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertEqual(portfolio_route, "portfolio_group_breakdown")
         self.assertEqual(scope_route, "scope_detail")
         self.assertEqual(hotel_route, "single_hotel_detail")
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_incomplete_portfolio_quality_suppresses_partial_scope(self):
+        parsed = {
+            "query_plan": {
+                "query_grain": "portfolio",
+                "resolved_hotel_count": 83,
+            }
+        }
+        quality = ai_query_main.incomplete_portfolio_quality(parsed, [{"portfolio_member_count": 50}])
+        self.assertEqual(quality["status"], "mismatch")
+        self.assertEqual(quality["expected_hotel_count"], 83)
+        self.assertEqual(quality["actual_hotel_count"], 50)
+
+        overcomplete_quality = ai_query_main.incomplete_portfolio_quality(parsed, [{"portfolio_member_count": 84}])
+        self.assertEqual(overcomplete_quality["status"], "mismatch")
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_build_portfolio_sql_counts_distinct_hotels(self):
+        sql = ai_query_main.build_portfolio_sql(
+            {
+                "source_table": "wddm_dim_overview_cockpit_f",
+                "period_fields": {
+                    "MTD": {
+                        "actual": "OWNER_PROFIT_MTD_A",
+                        "budget": "OWNER_PROFIT_MTD_B",
+                        "last_year": "OWNER_PROFIT_MTD_L",
+                    }
+                },
+            },
+            {
+                "period_type": "MTD",
+                "compare_mode": "yoy",
+                "time_scope": "202603",
+                "query_plan": {
+                    "query_object_type": "hotel_group",
+                    "query_object_label": "公司全部酒店",
+                    "query_grain": "portfolio",
+                },
+            },
+        )
+        self.assertIn("COUNT(DISTINCT TRIM(COALESCE(s.hotel_name_s, o.hotel_name))) AS portfolio_member_count", sql)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_sql_uses_analysis_focus_for_yoy_ordering(self):

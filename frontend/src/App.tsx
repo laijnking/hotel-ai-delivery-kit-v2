@@ -681,6 +681,8 @@ function isDuplicateSectionAgainstAnalysisBlocks(section: any, blockSignatures: 
 function getTemplateSectionOrder(templateCode: string) {
   if (templateCode === "executive_group_dimension") {
     return [
+      "分析范围",
+      "分维度经营摘要",
       "经营总览",
       "管理公司/区域汇总",
       "收入质量",
@@ -698,13 +700,14 @@ function getTemplateSectionOrder(templateCode: string) {
   if (templateCode === "executive_hotel_snapshot") {
     return [
       "分析范围",
-      "经营总览",
+      "经营结果",
+      "问题归因",
+      "横向对标",
+      "结论",
       "收入质量",
       "客房效率",
       "利润质量",
       "成本效率",
-      "横向对标",
-      "结论",
       "风险",
       "建议",
     ];
@@ -712,6 +715,7 @@ function getTemplateSectionOrder(templateCode: string) {
   if (templateCode === "executive_portfolio") {
     return [
       "分析范围",
+      "组合经营摘要",
       "经营总览",
       "管理公司/区域汇总",
       "收入质量",
@@ -730,9 +734,9 @@ function getTemplateSectionOrder(templateCode: string) {
 }
 
 function getTemplateSectionTitle(templateCode: string) {
-  if (templateCode === "executive_group_dimension") return "管理层速读";
-  if (templateCode === "executive_hotel_snapshot") return "经营摘要";
-  if (templateCode === "executive_portfolio") return "组合总览";
+  if (templateCode === "executive_group_dimension") return "分维度经营简报";
+  if (templateCode === "executive_hotel_snapshot") return "单店经营简报";
+  if (templateCode === "executive_portfolio") return "管理层经营简报";
   return "分层分析";
 }
 
@@ -741,7 +745,7 @@ function getVisibleManagementSections(result: any) {
   if (!sections.length) return [];
   const templateCode = getReportTemplateCode(result);
   const order = getTemplateSectionOrder(templateCode);
-  const limit = templateCode === "executive_group_dimension" ? 4 : templateCode === "executive_hotel_snapshot" ? 3 : 5;
+  const limit = templateCode === "executive_group_dimension" ? 4 : templateCode === "executive_hotel_snapshot" ? 4 : 5;
   const analysisBlocks = getAnalysisBlocks(result);
   const blockSignatures = analysisBlocks.length ? getAnalysisBlockSignatures(analysisBlocks) : null;
 

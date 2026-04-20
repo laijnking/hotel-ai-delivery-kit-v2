@@ -135,7 +135,7 @@ def _bundle_summary_title(bundle_code: str, template_code: str) -> str:
     if template_code == "executive_group_dimension":
         return "分维度经营摘要"
     if template_code == "executive_hotel_snapshot":
-        return "单店经营摘要"
+        return "经营结果"
     if template_code == "executive_portfolio":
         return "组合经营摘要"
     return {
@@ -988,6 +988,222 @@ def _build_cost_efficiency_text(row: dict[str, Any]) -> str:
     return "；".join(parts) + "。"
 
 
+def _metric_triplet_text(label: str, actual: Any, budget: Any, last_year: Any) -> str:
+    def _render(value: Any) -> str:
+        return value if isinstance(value, str) else _format_amount(value)
+
+    return f"{label}：实际 {_render(actual)} / 预算 {_render(budget)} / 同比 {_render(last_year)}"
+
+
+def _hotel_profit_rate_triplet_text(row: dict[str, Any]) -> str:
+    return _metric_triplet_text(
+        "利润率",
+        _ratio_text(row.get("owner_profit_actual"), row.get("total_income_actual")),
+        _ratio_text(row.get("owner_profit_budget"), row.get("total_income_budget")),
+        _ratio_text(row.get("owner_profit_last_year"), row.get("total_income_last_year")),
+    )
+
+
+def _build_hotel_result_text(row: dict[str, Any]) -> str:
+    parts = [
+        _metric_triplet_text("总收入", row.get("total_income_actual"), row.get("total_income_budget"), row.get("total_income_last_year")),
+        _metric_triplet_text("业主利润", row.get("owner_profit_actual"), row.get("owner_profit_budget"), row.get("owner_profit_last_year")),
+        _hotel_profit_rate_triplet_text(row),
+        _metric_triplet_text("RevPAR", row.get("revpar_actual"), row.get("revpar_budget"), row.get("revpar_last_year")),
+    ]
+    return "；".join(parts) + "。"
+
+
+def _build_hotel_driver_text(row: dict[str, Any]) -> str:
+    room_text = (
+        f"客房：ADR {_format_amount(row.get('adr_actual'))}，OCC {_format_percent(row.get('occupancy_rate_actual'))}，"
+        f"RevPAR {_format_amount(row.get('revpar_actual'))}，客房收入 {_format_amount(row.get('room_income_actual'))}，"
+        f"客房利润 {_format_amount(row.get('room_profit_actual'))}。"
+    )
+    food_text = (
+        f"餐饮：餐厅收入 {_format_amount(row.get('restaurant_income_actual'))}，宴会收入 {_format_amount(row.get('banquet_income_actual'))}，"
+        f"餐饮利润 {_format_amount(row.get('restaurant_profit_actual'))}。"
+    )
+    cost_text = (
+        f"成本：人工 {_format_amount(row.get('people_cost_actual'))}，能耗 {_format_amount(row.get('energy_expenses_actual'))}，"
+        f"行政费用 {_format_amount(row.get('admin_expenses_actual'))}。"
+    )
+    return " ".join([room_text, food_text, cost_text])
+
+
+def _build_hotel_benchmark_section_text(
+    row: dict[str, Any],
+    peer_benchmark: dict[str, Any] | None,
+    external_benchmark_requested: bool,
+) -> str:
+    internal_text = _build_internal_benchmark_text(peer_benchmark)
+    same_area_text = "集团内同区域排名：当前结果未返回明确名次，可继续补充集团内同区域排名位次。"
+    same_level_text = (
+        f"集团内同档次对比：{internal_text}"
+        if internal_text
+        else "集团内同档次对比：当前已返回区域/品牌/档次标签，但内部同档次样本暂不足。"
+    )
+    external_text = (
+        "外部同行市场对比：已开启外部同行对标，但当前系统尚未接入稳定外部市场源。"
+        if external_benchmark_requested
+        else "外部同行市场对比：当前默认先展示集团内部对比，如需市场对标需额外开启外部同行源。"
+    )
+    return " ".join([same_area_text, same_level_text, external_text])
+
+
+def _diff_direction(actual: Any, compare: Any) -> str:
+    actual_num = _numeric(actual)
+    compare_num = _numeric(compare)
+    if actual_num is None or compare_num is None:
+        return "待补数据"
+    if actual_num > compare_num:
+        return "高于"
+    if actual_num < compare_num:
+        return "低于"
+    return "持平"
+
+
+def _pick_hotel_core_issues(row: dict[str, Any]) -> list[str]:
+    issues: list[tuple[str, int]] = []
+    room_score = 0
+    for actual_key, compare_key in (
+        ("occupancy_rate_actual", "occupancy_rate_budget"),
+        ("adr_actual", "adr_budget"),
+        ("revpar_actual", "revpar_budget"),
+        ("room_income_actual", "room_income_budget"),
+    ):
+        actual_num = _numeric(row.get(actual_key))
+        compare_num = _numeric(row.get(compare_key))
+        if actual_num is not None and compare_num is not None and actual_num < compare_num:
+            room_score += 1
+    if room_score:
+        issues.append(("客房端量价效率偏弱，ADR、OCC 或 RevPAR 低于预算，客房收入转化承压", room_score))
+
+    food_score = 0
+    for actual_key, compare_key in (
+        ("restaurant_income_actual", "restaurant_income_budget"),
+        ("banquet_income_actual", "banquet_income_budget"),
+        ("restaurant_profit_actual", "restaurant_profit_budget"),
+    ):
+        actual_num = _numeric(row.get(actual_key))
+        compare_num = _numeric(row.get(compare_key))
+        if actual_num is not None and compare_num is not None and actual_num < compare_num:
+            food_score += 1
+    if food_score:
+        issues.append(("餐饮端收入与利润贡献不足，餐厅或宴会业务未有效支撑总收入和利润", food_score))
+
+    total_income = _numeric(row.get("total_income_actual"))
+    cost_score = 0
+    for key, threshold in (
+        ("people_cost_actual", 0.30),
+        ("energy_expenses_actual", 0.08),
+        ("admin_expenses_actual", 0.18),
+    ):
+        value_num = _numeric(row.get(key))
+        if total_income and value_num is not None and total_income > 0 and value_num / total_income > threshold:
+            cost_score += 1
+    if cost_score:
+        issues.append(("成本费用率偏高，人工、能耗或行政费用对业主利润形成挤压", cost_score))
+
+    if not issues:
+        return [
+            "当前结果未显示出单一异常项，建议优先复核房务效率与收入转化是否同步。",
+            "同时补看人工、能耗和行政费用率，确认利润率是否被成本端侵蚀。",
+        ]
+    issues.sort(key=lambda item: item[1], reverse=True)
+    picked = [item[0] for item in issues[:2]]
+    if len(picked) == 1:
+        picked.append("建议同步检查收入结构与成本效率，避免单一指标改善未转成利润。")
+    return picked
+
+
+def _build_hotel_conclusion_text(row: dict[str, Any]) -> str:
+    overall_inputs = [
+        _diff_direction(row.get("total_income_actual"), row.get("total_income_budget")),
+        _diff_direction(row.get("owner_profit_actual"), row.get("owner_profit_budget")),
+        _diff_direction(row.get("revpar_actual"), row.get("revpar_budget")),
+    ]
+    pressure_count = sum(1 for item in overall_inputs if item == "低于")
+    if pressure_count >= 2:
+        overall = "整体经营承压"
+    elif any(item == "高于" for item in overall_inputs):
+        overall = "整体经营基本稳定，局部指标有改善"
+    else:
+        overall = "整体经营基本平稳"
+    issues = _pick_hotel_core_issues(row)
+    actions: list[str] = []
+    issue_text = " ".join(issues)
+    if "客房" in issue_text:
+        actions.append("复盘房价与出租率策略，按日历和渠道优化 ADR 与 OCC")
+    if "餐饮" in issue_text:
+        actions.append("聚焦餐厅和宴会引流，提升餐饮收入与利润转化")
+    if "成本" in issue_text or "费用" in issue_text:
+        actions.append("压降人工、能耗和行政费用占收比，盯住费用刚性")
+    fallback_actions = [
+        "复核预算缺口最大的经营指标，明确责任部门和周跟踪节奏",
+        "对标集团内同区域同档次样本，补齐房务和餐饮短板",
+        "围绕收入提升与费用管控同步制定下月整改动作",
+    ]
+    for action in fallback_actions:
+        if len(actions) >= 3:
+            break
+        if action not in actions:
+            actions.append(action)
+    return (
+        f"一句话经营判断：本月总收入{_diff_direction(row.get('total_income_actual'), row.get('total_income_budget'))}预算，"
+        f"业主利润{_diff_direction(row.get('owner_profit_actual'), row.get('owner_profit_budget'))}预算，"
+        f"RevPAR{_diff_direction(row.get('revpar_actual'), row.get('revpar_budget'))}预算，{overall}。"
+        f" 两个核心问题：1. {issues[0]}；2. {issues[1]}。"
+        f" 三个改进动作：1. {actions[0]}；2. {actions[1]}；3. {actions[2]}。"
+    )
+
+
+def _build_group_conclusion_text(
+    row: dict[str, Any],
+    *,
+    scope_label: str,
+    dimension_text: str | None = None,
+    outlier_text: str | None = None,
+) -> str:
+    revenue_direction = _diff_direction(row.get("total_income_actual"), row.get("total_income_last_year"))
+    profit_direction = _diff_direction(row.get("owner_profit_actual"), row.get("owner_profit_last_year"))
+    revpar_direction = _diff_direction(row.get("revpar_actual"), row.get("revpar_last_year"))
+    if [revenue_direction, profit_direction, revpar_direction].count("低于") >= 2:
+        overall = "整体经营承压"
+    elif "高于" in {revenue_direction, profit_direction, revpar_direction}:
+        overall = "整体经营有改善点，但结构仍需继续优化"
+    else:
+        overall = "整体经营基本平稳"
+
+    issues: list[str] = []
+    if dimension_text:
+        issues.append("管理公司与区域表现分化明显，建议优先看板块差异而不是直接下钻单店")
+    if _numeric(row.get("revpar_actual")) is not None and _numeric(row.get("revpar_last_year")) is not None and _numeric(row.get("revpar_actual")) < _numeric(row.get("revpar_last_year")):
+        issues.append("房务效率偏弱，RevPAR 未恢复到去年同期水平")
+    if _numeric(row.get("owner_profit_actual")) is not None and _numeric(row.get("owner_profit_last_year")) is not None and _numeric(row.get("owner_profit_actual")) < _numeric(row.get("owner_profit_last_year")):
+        issues.append("利润转化承压，收入变化没有充分转成业主利润")
+    if outlier_text:
+        issues.append("组合内头尾酒店分化较大，异常酒店对整体结果形成拖累")
+    if len(issues) < 2:
+        issues.extend([
+            "建议继续拆收入、利润和成本三层结构，确认主要波动来自哪一端",
+            "建议同步核对重点区域和重点酒店，避免局部异常掩盖整体趋势",
+        ])
+    issues = issues[:2]
+
+    actions = [
+        f"先按 {scope_label} 下的管理公司和区域维度梳理差异，明确主要承压板块",
+        "围绕客房效率、利润转化和成本率三项指标建立月度跟踪清单",
+        "对拖累组合的重点酒店逐家复盘，形成针对性的经营整改动作",
+    ]
+    return (
+        f"管理结论：{scope_label} 本期总收入{revenue_direction}去年同期，业主利润{profit_direction}去年同期，"
+        f"RevPAR{revpar_direction}去年同期，{overall}。"
+        f" 两个核心问题：1. {issues[0]}；2. {issues[1]}。"
+        f" 三个优先动作：1. {actions[0]}；2. {actions[1]}；3. {actions[2]}。"
+    )
+
+
 def _build_internal_benchmark_text(peer_benchmark: dict[str, Any] | None) -> str | None:
     if not isinstance(peer_benchmark, dict):
         return None
@@ -1022,10 +1238,10 @@ def _build_benchmark_text(row: dict[str, Any], peer_insight: str | None, peer_be
     internal_text = _build_internal_benchmark_text(peer_benchmark)
     if internal_text:
         suffix = "；你已开启外部行业对标，但当前系统尚未接入稳定外部源，后续可按需联网补充。" if external_benchmark_requested else ""
-        return f"{internal_text} 当前酒店维度标签：{descriptor_text or '未返回区域/品牌/档次标签'}{suffix}"
+        return f"{internal_text} 当前口径标签：{descriptor_text or '未返回区域/品牌/档次标签'}{suffix}"
     if peer_insight:
         suffix = "；你已开启外部行业对标，但当前系统尚未接入稳定外部源，后续可按需联网补充。" if external_benchmark_requested else ""
-        return f"{peer_insight} 当前酒店维度标签：{descriptor_text or '未返回区域/品牌/档次标签'}{suffix}"
+        return f"{peer_insight} 当前口径标签：{descriptor_text or '未返回区域/品牌/档次标签'}{suffix}"
     if external_benchmark_requested:
         return f"当前返回了区域/品牌/档次标签：{descriptor_text or '未返回'}；内部同口径对标样本暂不足。你已开启外部行业对标，但当前系统尚未接入稳定外部源，后续可按需联网补充。"
     return f"当前返回了区域/品牌/档次标签：{descriptor_text or '未返回'}；如需判断相对位置，需要在同区域、同品牌、同档次样本内同时比较收入、RevPAR、利润率和成本率。"
@@ -1176,21 +1392,15 @@ def _build_template_summary_text(
             f"当前已按 {scope_label} 做分维度汇总；本次组合样本 {member_count or 'N/A'} 家，对{compare_scope}的差额 {_format_amount(row.get('diff_value'))}，差异率约 {_format_percent(row.get('diff_rate'))}。",
         ]
         if dimension_text:
-            parts.append("已补充管理公司与区域层级的前三项对比。")
-        if outlier_text:
-            parts.append(outlier_text)
+            parts.append("已补充管理公司与区域层级对比，建议先看结构差异，再下钻经营归因。")
         return " ".join(part for part in parts if part)
     parts = [
         preamble,
         focus_lead,
         f"当前已按 {scope_label} 做组合汇总；本次组合样本 {member_count or 'N/A'} 家，对{compare_scope}的差额 {_format_amount(row.get('diff_value'))}，差异率约 {_format_percent(row.get('diff_rate'))}。",
     ]
-    if portfolio_insight:
-        parts.append(portfolio_insight)
-    if outlier_text:
-        parts.append(outlier_text)
     if dimension_text:
-        parts.append("已按管理公司/区域维度补充观察。")
+        parts.append("已按管理公司与区域补充结构观察，建议先看板块差异，再继续下钻单店。")
     return " ".join(part for part in parts if part)
 
 
@@ -1280,13 +1490,21 @@ def _build_report_style_sections_v2(
         member_count=member_count,
         portfolio_insight=_portfolio_breakdown_text(portfolio_breakdown or []) if template_code == "executive_portfolio" else None,
         outlier_text=outlier_text if template_code in {"executive_portfolio", "executive_group_dimension"} else None,
-        dimension_text=dimension_text if template_code == "executive_group_dimension" else None,
+        dimension_text=dimension_text if template_code in {"executive_portfolio", "executive_group_dimension"} else None,
     )
-    sections = [
-        {"title": "分析范围", "content": f"{period}，{scope_label}，样本 {member_count} 家。"},
-        {"title": summary_title, "content": summary_content},
-    ]
-    if template_code == "executive_group_dimension" and dimension_text:
+    sections = [{"title": "分析范围", "content": f"{period}，{scope_label}，样本 {member_count} 家。"}]
+    if template_code == "executive_hotel_snapshot":
+        sections.extend([
+            {"title": summary_title, "content": _build_hotel_result_text(row)},
+            {"title": "问题归因", "content": _build_hotel_driver_text(row)},
+            {"title": "横向对标", "content": _build_hotel_benchmark_section_text(row, peer_benchmark, external_benchmark_requested)},
+            {"title": "结论", "content": _build_hotel_conclusion_text(row)},
+        ])
+    else:
+        sections.append({"title": summary_title, "content": summary_content})
+        if summary_title != "经营总览":
+            sections.append({"title": "经营总览", "content": f"总收入 {_format_amount(row.get('total_income_actual'))}；NOP业主净利润 {_format_amount(row.get('owner_profit_actual'))}；NOP率 {_ratio_text(row.get('owner_profit_actual'), row.get('total_income_actual'))}；经营利润（GOP） {_format_amount(row.get('operating_profit_actual'))}；对{compare_scope}差额 {_format_amount(row.get('diff_value'))}，差异率 {_format_percent(row.get('diff_rate'))}。"})
+    if template_code in {"executive_portfolio", "executive_group_dimension"} and dimension_text:
         sections.append({"title": "管理公司/区域汇总", "content": dimension_text})
     sections.extend([
         {"title": "收入质量", "content": risks[0] if len(risks) > 0 else _build_income_quality_text(row)},
@@ -1297,9 +1515,11 @@ def _build_report_style_sections_v2(
     if template_code == "executive_portfolio":
         sections.append({"title": "重点酒店与梯队", "content": f"{ranking_text} {tier_text} {outlier_text}"})
         sections.append({"title": "横向对标与继续追问", "content": f"{benchmark_text} 可继续问：{follow_up_text}"})
+        sections.append({"title": "结论", "content": _build_group_conclusion_text(row, scope_label=scope_label, dimension_text=dimension_text, outlier_text=outlier_text)})
     elif template_code == "executive_group_dimension":
         sections.append({"title": "横向对标与继续追问", "content": f"{benchmark_text} 可继续问：{follow_up_text}"})
-    else:
+        sections.append({"title": "结论", "content": _build_group_conclusion_text(row, scope_label=scope_label, dimension_text=dimension_text, outlier_text=outlier_text)})
+    elif template_code != "executive_hotel_snapshot":
         sections.append({"title": "横向对标", "content": f"{benchmark_text} 可继续问：{follow_up_text}"})
     return _apply_report_template(parsed_intent, sections)
 
@@ -1848,9 +2068,52 @@ def _parse_llm_json(content: str) -> dict | None:
             return None
 
 
+def _replace_report_section_content(
+    sections: list[dict[str, Any]],
+    title: str,
+    content: str,
+) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    replaced = False
+    for item in sections:
+        if not isinstance(item, dict):
+            updated.append(item)
+            continue
+        if str(item.get("title") or "") == title:
+            updated.append({**item, "content": content})
+            replaced = True
+        else:
+            updated.append(item)
+    if not replaced:
+        updated.append({"title": title, "content": content})
+    return updated
+
+
 def _call_llm_summary(question: str, parsed_intent: dict[str, Any], rows: list[dict[str, Any]], base_result: dict[str, Any]) -> dict | None:
     if not llm_enabled():
         return None
+
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    template_code = str(query_plan.get("report_template_code") or "").strip()
+    if template_code == "executive_hotel_snapshot":
+        field_text = "字段包括 summary, risks, suggestions, conclusion。"
+        extra_rules = (
+            "conclusion 专门用于单店管理结论，必须固定输出三句："
+            "一句话经营判断；两个核心问题；三个改进动作。"
+            "允许在输入事实基础上做管理推理，但不能编造未返回的数据。"
+            "suggestions 仍只写后续追问或补数方向，不替代 conclusion。"
+        )
+    elif template_code in {"executive_portfolio", "executive_group_dimension"}:
+        field_text = "字段包括 summary, risks, suggestions, conclusion。"
+        extra_rules = (
+            "conclusion 专门用于集团/组合管理结论。"
+            "允许在输入事实基础上做管理推理，但不能编造未返回的数据。"
+            "必须包含整体判断、两个核心问题和三个优先动作。"
+            "suggestions 仍只写后续追问或补数方向，不替代 conclusion。"
+        )
+    else:
+        field_text = "字段包括 summary, risks, suggestions。"
+        extra_rules = "suggestions 只写后续需要补齐的数据维度，不要写管理动作或责任建议。"
 
     payload = {
         "question": question,
@@ -1861,11 +2124,11 @@ def _call_llm_summary(question: str, parsed_intent: dict[str, Any], rows: list[d
     system_prompt = (
         "你是酒店运营数据分析助手，强调客观拆解，不直接下经营好坏结论。"
         "请根据输入输出 JSON，不要输出额外文字。"
-        "字段包括 summary, risks, suggestions。"
+        f"{field_text}"
         "summary 只说明当前数据范围和可观察事实，不要写健康、承压、好坏等结论。"
         "risks 必须按顺序给出五段：收入质量、客房效率、利润质量、成本效率、横向对标。"
         "如果输入数据缺少某维度，必须明确写“当前未取数/当前结果未包含”，不要编造。"
-        "suggestions 只写后续需要补齐的数据维度，不要写管理动作或责任建议。"
+        f"{extra_rules}"
         "所有金额必须保留千位分隔符。"
     )
     request_body = {
@@ -1919,18 +2182,31 @@ def _apply_llm_enhancement(question: str, parsed_intent: dict[str, Any], rows: l
     summary = str(llm_result.get("summary") or result.get("summary") or "")
     risks = llm_result.get("risks")
     suggestions = llm_result.get("suggestions")
+    conclusion = str(llm_result.get("conclusion") or "").strip()
     if not isinstance(risks, list) or not risks:
         risks = result.get("risks", [])
     if not isinstance(suggestions, list) or not suggestions:
         suggestions = result.get("suggestions", [])
 
     enhanced = dict(result)
+    query_plan = parsed_intent.get("query_plan") if isinstance(parsed_intent, dict) and isinstance(parsed_intent.get("query_plan"), dict) else {}
+    template_code = str(query_plan.get("report_template_code") or "").strip()
     enhanced["summary"] = summary
     if not enhanced.get("management_summary"):
         enhanced["management_summary"] = [summary]
     enhanced["risks"] = [str(item) for item in risks]
     enhanced["suggestions"] = [str(item) for item in suggestions]
-    enhanced["report_sections"] = _build_executive_sections(enhanced["summary"], enhanced["risks"], enhanced["suggestions"])
+    report_sections = enhanced.get("report_sections")
+    if not isinstance(report_sections, list):
+        report_sections = _build_executive_sections(enhanced["summary"], enhanced["risks"], enhanced["suggestions"])
+    if template_code in {"executive_hotel_snapshot", "executive_portfolio", "executive_group_dimension"} and conclusion:
+        report_sections = _replace_report_section_content(report_sections, "结论", conclusion)
+        management_summary = enhanced.get("management_summary")
+        if isinstance(management_summary, list) and management_summary:
+            enhanced["management_summary"] = [management_summary[0], conclusion]
+        else:
+            enhanced["management_summary"] = [summary, conclusion]
+    enhanced["report_sections"] = report_sections
     enhanced["llm_enhancement"] = {
         "used": True,
         "policy": LLM_EXPLANATION_POLICY,

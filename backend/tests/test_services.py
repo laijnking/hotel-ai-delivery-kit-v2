@@ -1013,7 +1013,58 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertLess(section_titles.index("分维度经营摘要"), section_titles.index("管理公司/区域汇总"))
         self.assertLess(section_titles.index("管理公司/区域汇总"), section_titles.index("收入质量"))
         self.assertNotIn("重点酒店与梯队", section_titles)
+        self.assertIn("结论", section_titles)
         self.assertIn("管理公司、区域、品牌的相对位置", result["management_summary"][0])
+
+    @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
+    def test_portfolio_management_report_puts_structure_before_watchlist(self):
+        req = explanation_main.Req(
+            question="汇总一下本月所有酒店的经营情况",
+            parsed_intent={
+                "metric_code": "OWNER_PROFIT",
+                "intent": "query",
+                "compare_mode": "yoy",
+                "time_scope": "202603",
+                "analysis_focus": "management_report",
+                "query_plan": {
+                    "query_object_type": "hotel_group",
+                    "query_object_label": "公司全部酒店",
+                    "query_grain": "portfolio",
+                    "analysis_mode": "management_report",
+                    "report_template_code": "executive_portfolio",
+                },
+            },
+            rows=[{
+                "hotel_name": "公司全部酒店",
+                "portfolio_member_count": 83,
+                "actual_value": 57076326.51,
+                "compare_value": 73118911.34,
+                "diff_value": -16042584.83,
+                "diff_rate": -0.2194,
+                "total_income_actual": 349364837.12,
+                "owner_profit_actual": 57076326.51,
+                "operating_profit_actual": 81120537.96,
+            }],
+            portfolio_breakdown=[
+                {"hotel_name": "重庆万州希尔顿逸林", "total_income_actual": 1727765.38, "owner_profit_actual": 94469.52, "operating_profit_actual": 198362.69, "revpar_actual": 141.11, "diff_value": 101902.88},
+                {"hotel_name": "太原文华", "total_income_actual": 2254909.25, "owner_profit_actual": -397444.53, "operating_profit_actual": -338219.09, "revpar_actual": 90.07, "diff_value": -398952.29},
+            ],
+            dimension_breakdowns={
+                "manage_corp": [{"manage_corp": "国际品牌", "hotel_count": 32, "total_income_actual": 185573325.12, "owner_profit_actual": 34576303.42, "operating_profit_actual": 50403677.71, "revpar_actual": 406.2}],
+                "area": [{"area": "华南区", "hotel_count": 16, "total_income_actual": 98899370.88, "owner_profit_actual": 21158918.18, "operating_profit_actual": 29527649.86, "revpar_actual": 464.83}],
+            },
+        )
+        result = explanation_main.explain(req)
+        section_titles = [item["title"] for item in result["report_sections"]]
+        self.assertLess(section_titles.index("组合经营摘要"), section_titles.index("经营总览"))
+        self.assertLess(section_titles.index("经营总览"), section_titles.index("管理公司/区域汇总"))
+        self.assertLess(section_titles.index("管理公司/区域汇总"), section_titles.index("重点酒店与梯队"))
+        self.assertLess(section_titles.index("横向对标与继续追问"), section_titles.index("结论"))
+        summary_text = next(item["content"] for item in result["report_sections"] if item["title"] == "组合经营摘要")
+        self.assertNotIn("重庆万州希尔顿逸林", summary_text)
+        self.assertIn("先看板块差异", summary_text)
+        conclusion_text = next(item["content"] for item in result["report_sections"] if item["title"] == "结论")
+        self.assertIn("管理结论：", conclusion_text)
 
     @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
     def test_hotel_snapshot_template_filters_portfolio_only_sections(self):
@@ -1061,10 +1112,12 @@ class ServiceSmokeTests(unittest.TestCase):
         )
         result = explanation_main.explain(req)
         section_titles = [item["title"] for item in result["report_sections"]]
-        self.assertIn("单店经营摘要", section_titles)
+        self.assertIn("经营结果", section_titles)
+        self.assertIn("问题归因", section_titles)
         self.assertNotIn("分维度经营摘要", section_titles)
         self.assertNotIn("重点酒店与梯队", section_titles)
         self.assertIn("横向对标", section_titles)
+        self.assertIn("结论", section_titles)
 
     @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
     def test_income_structure_focus_prioritizes_income_sections_and_prompts(self):
@@ -1106,8 +1159,8 @@ class ServiceSmokeTests(unittest.TestCase):
         )
         result = explanation_main.explain(req)
         section_titles = [item["title"] for item in result["report_sections"]]
-        self.assertEqual(section_titles[1], "收入质量")
-        self.assertLess(section_titles.index("收入质量"), section_titles.index("单店经营摘要"))
+        self.assertEqual(section_titles[2], "收入质量")
+        self.assertLess(section_titles.index("收入质量"), section_titles.index("问题归因"))
         self.assertIn("收入结构", result["management_summary"][0])
         self.assertIn("客房收入", "；".join(result["suggestions"]))
 
@@ -1151,11 +1204,201 @@ class ServiceSmokeTests(unittest.TestCase):
         )
         result = explanation_main.explain(req)
         section_titles = [item["title"] for item in result["report_sections"]]
-        self.assertEqual(section_titles[1], "利润质量")
-        self.assertLess(section_titles.index("利润质量"), section_titles.index("单店经营摘要"))
-        self.assertLess(section_titles.index("成本效率"), section_titles.index("单店经营摘要"))
+        self.assertEqual(section_titles[2], "利润质量")
+        self.assertLess(section_titles.index("利润质量"), section_titles.index("问题归因"))
+        self.assertLess(section_titles.index("成本效率"), section_titles.index("问题归因"))
         self.assertIn("利润与成本", result["management_summary"][0])
         self.assertIn("人工成本", "；".join(result["suggestions"]))
+
+    @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
+    def test_hotel_snapshot_conclusion_uses_fixed_three_sentence_structure(self):
+        req = explanation_main.Req(
+            question="广州丽思卡尔顿酒店3月的经营情况怎么样？",
+            parsed_intent={
+                "metric_code": "OWNER_PROFIT",
+                "intent": "query",
+                "compare_mode": "budget",
+                "time_scope": "202603",
+                "analysis_focus": "management_report",
+                "query_plan": {
+                    "query_object_type": "single_hotel",
+                    "query_object_label": "广州丽思卡尔顿酒店",
+                    "query_grain": "hotel",
+                    "analysis_mode": "hotel_metric_snapshot",
+                    "report_template_code": "executive_hotel_snapshot",
+                },
+            },
+            rows=[{
+                "hotel_name": "广州丽思卡尔顿酒店",
+                "actual_value": 5100000.0,
+                "compare_value": 5400000.0,
+                "diff_value": -300000.0,
+                "diff_rate": -0.0556,
+                "total_income_actual": 24229360.0,
+                "total_income_budget": 25229360.0,
+                "total_income_last_year": 23229360.0,
+                "room_income_actual": 17000000.0,
+                "room_income_budget": 18000000.0,
+                "restaurant_income_actual": 3800000.0,
+                "restaurant_income_budget": 4200000.0,
+                "banquet_income_actual": 2000000.0,
+                "banquet_income_budget": 2500000.0,
+                "owner_profit_actual": 5100000.0,
+                "owner_profit_budget": 5600000.0,
+                "owner_profit_last_year": 4900000.0,
+                "operating_profit_actual": 6800000.0,
+                "operating_profit_budget": 7300000.0,
+                "operating_profit_last_year": 6500000.0,
+                "room_profit_actual": 9200000.0,
+                "room_profit_budget": 9800000.0,
+                "restaurant_profit_actual": 800000.0,
+                "restaurant_profit_budget": 1200000.0,
+                "occupancy_rate_actual": 0.68,
+                "occupancy_rate_budget": 0.72,
+                "adr_actual": 930.0,
+                "adr_budget": 980.0,
+                "revpar_actual": 632.4,
+                "revpar_budget": 705.6,
+                "revpar_last_year": 620.0,
+                "people_cost_actual": 8200000.0,
+                "energy_expenses_actual": 2300000.0,
+                "admin_expenses_actual": 5100000.0,
+            }],
+        )
+        result = explanation_main.explain(req)
+        conclusion = next(item["content"] for item in result["report_sections"] if item["title"] == "结论")
+        self.assertIn("一句话经营判断：", conclusion)
+        self.assertIn("两个核心问题：", conclusion)
+        self.assertIn("三个改进动作：", conclusion)
+
+    @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
+    def test_hotel_snapshot_llm_enhancement_only_replaces_conclusion_section(self):
+        req = explanation_main.Req(
+            question="广州丽思卡尔顿酒店3月的经营情况怎么样？",
+            parsed_intent={
+                "metric_code": "OWNER_PROFIT",
+                "intent": "query",
+                "compare_mode": "budget",
+                "time_scope": "202603",
+                "analysis_focus": "management_report",
+                "query_plan": {
+                    "query_object_type": "single_hotel",
+                    "query_object_label": "广州丽思卡尔顿酒店",
+                    "query_grain": "hotel",
+                    "analysis_mode": "hotel_metric_snapshot",
+                    "report_template_code": "executive_hotel_snapshot",
+                },
+            },
+            rows=[{
+                "hotel_name": "广州丽思卡尔顿酒店",
+                "actual_value": 5100000.0,
+                "compare_value": 5400000.0,
+                "diff_value": -300000.0,
+                "diff_rate": -0.0556,
+                "total_income_actual": 24229360.0,
+                "total_income_budget": 25229360.0,
+                "total_income_last_year": 23229360.0,
+                "room_income_actual": 17000000.0,
+                "owner_profit_actual": 5100000.0,
+                "owner_profit_budget": 5600000.0,
+                "owner_profit_last_year": 4900000.0,
+                "revpar_actual": 632.4,
+                "revpar_budget": 705.6,
+                "revpar_last_year": 620.0,
+                "occupancy_rate_actual": 0.68,
+                "adr_actual": 930.0,
+                "restaurant_income_actual": 3800000.0,
+                "banquet_income_actual": 2000000.0,
+                "restaurant_profit_actual": 800000.0,
+                "people_cost_actual": 8200000.0,
+                "energy_expenses_actual": 2300000.0,
+                "admin_expenses_actual": 5100000.0,
+            }],
+        )
+        with patch.object(explanation_main, "should_use_llm_enhancement", return_value=True), patch.object(
+            explanation_main,
+            "_call_llm_summary",
+            return_value={
+                "summary": "模型已基于当前单店事实完成经营判断。",
+                "risks": [
+                    "收入质量保持客观拆解。",
+                    "客房效率保持客观拆解。",
+                    "利润质量保持客观拆解。",
+                    "成本效率保持客观拆解。",
+                    "横向对标保持客观拆解。",
+                ],
+                "suggestions": ["继续看房务价格带。"],
+                "conclusion": "一句话经营判断：模型认为本月经营承压。 两个核心问题：1. 客房效率偏弱；2. 费用率偏高。 三个改进动作：1. 调整价格策略；2. 强化宴会引流；3. 压降行政费用。",
+            },
+        ):
+            result = explanation_main.explain(req)
+        section_titles = [item["title"] for item in result["report_sections"]]
+        self.assertEqual(section_titles[:5], ["分析范围", "经营结果", "问题归因", "横向对标", "结论"])
+        conclusion = next(item["content"] for item in result["report_sections"] if item["title"] == "结论")
+        self.assertIn("模型认为本月经营承压", conclusion)
+        self.assertEqual(result["llm_enhancement"]["used"], True)
+
+    @unittest.skipIf(explanation_main is None, f"explanation-service deps missing: {explanation_error}")
+    def test_portfolio_llm_enhancement_only_replaces_conclusion_section(self):
+        req = explanation_main.Req(
+            question="汇总一下本月所有酒店的经营情况",
+            parsed_intent={
+                "metric_code": "OWNER_PROFIT",
+                "intent": "query",
+                "compare_mode": "yoy",
+                "time_scope": "202603",
+                "analysis_focus": "management_report",
+                "query_plan": {
+                    "query_object_type": "hotel_group",
+                    "query_object_label": "公司全部酒店",
+                    "query_grain": "portfolio",
+                    "analysis_mode": "management_report",
+                    "report_template_code": "executive_portfolio",
+                },
+            },
+            rows=[{
+                "hotel_name": "公司全部酒店",
+                "portfolio_member_count": 83,
+                "actual_value": 57076326.51,
+                "compare_value": 73118911.34,
+                "diff_value": -16042584.83,
+                "diff_rate": -0.2194,
+                "total_income_actual": 349364837.12,
+                "total_income_last_year": 390700472.12,
+                "owner_profit_actual": 57076326.51,
+                "owner_profit_last_year": 73118911.34,
+                "operating_profit_actual": 81120537.96,
+                "revpar_actual": 280.25,
+                "revpar_last_year": 306.22,
+            }],
+            dimension_breakdowns={
+                "manage_corp": [{"manage_corp": "国际品牌", "hotel_count": 32, "total_income_actual": 185573325.12, "owner_profit_actual": 34576303.42, "operating_profit_actual": 50403677.71, "revpar_actual": 406.2}],
+                "area": [{"area": "华南区", "hotel_count": 16, "total_income_actual": 98899370.88, "owner_profit_actual": 21158918.18, "operating_profit_actual": 29527649.86, "revpar_actual": 464.83}],
+            },
+        )
+        with patch.object(explanation_main, "should_use_llm_enhancement", return_value=True), patch.object(
+            explanation_main,
+            "_call_llm_summary",
+            return_value={
+                "summary": "模型已基于组合事实完成管理结论。",
+                "risks": [
+                    "收入质量保持客观拆解。",
+                    "客房效率保持客观拆解。",
+                    "利润质量保持客观拆解。",
+                    "成本效率保持客观拆解。",
+                    "横向对标保持客观拆解。",
+                ],
+                "suggestions": ["继续看华南区和国际品牌的差异。"],
+                "conclusion": "管理结论：模型认为集团整体承压。 两个核心问题：1. 区域分化明显；2. 利润转化不足。 三个优先动作：1. 先盯管理公司差异；2. 再抓重点区域；3. 最后下钻异常酒店。",
+            },
+        ):
+            result = explanation_main.explain(req)
+        section_titles = [item["title"] for item in result["report_sections"]]
+        self.assertEqual(section_titles[:4], ["分析范围", "组合经营摘要", "经营总览", "管理公司/区域汇总"])
+        self.assertIn("结论", section_titles)
+        conclusion = next(item["content"] for item in result["report_sections"] if item["title"] == "结论")
+        self.assertIn("模型认为集团整体承压", conclusion)
+        self.assertEqual(result["llm_enhancement"]["used"], True)
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_build_external_benchmark_stub_returns_provider_metadata(self):

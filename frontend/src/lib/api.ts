@@ -1,6 +1,4 @@
-const defaultApiUrl = typeof window !== "undefined"
-  ? `${window.location.protocol}//${window.location.hostname}:8100/api/v1/ai/query`
-  : "http://127.0.0.1:8100/api/v1/ai/query";
+const defaultApiUrl = "/api/v1/ai/query";
 const API_URL = import.meta.env.VITE_API_URL || defaultApiUrl;
 const REPORT_API_URL = import.meta.env.VITE_REPORT_API_URL || API_URL.replace("/ai/query", "/ai/report");
 const SETTINGS_API_URL = import.meta.env.VITE_SETTINGS_API_URL || API_URL.replace("/ai/query", "/system/settings");

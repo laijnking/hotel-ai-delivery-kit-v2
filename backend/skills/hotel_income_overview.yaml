@@ -2,7 +2,7 @@ id: hotel_income_overview
 name: 单店收入情况
 version: 1
 enabled: true
-description: 回答单个酒店或区域某月份收入表现，默认与预算对比。
+description: 回答单个酒店或区域某月份收入表现，默认与去年同期对比。
 
 triggers:
   - 收入情况
@@ -16,7 +16,7 @@ triggers:
 defaults:
   intent: query
   metric_code: TOTAL_INCOME
-  compare_mode: budget
+  compare_mode: yoy
   variance_direction: all
   period_type: MTD
 
@@ -38,7 +38,7 @@ examples:
   - question: 广州丽思卡尔顿酒店3月的收入情况怎么样？
     expected:
       metric_code: TOTAL_INCOME
-      compare_mode: budget
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 广州丽思卡尔顿酒店

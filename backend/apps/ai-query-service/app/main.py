@@ -32,12 +32,21 @@ EXTERNAL_BENCHMARK_ALLOWED_DOMAINS = [
     item.strip() for item in os.getenv("EXTERNAL_BENCHMARK_ALLOWED_DOMAINS", "").split(",") if item.strip()
 ]
 APP_SETTINGS = Path(__file__).resolve().parents[3] / "configs" / "app_settings.yaml"
+METRIC_DICTIONARY_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "metric_dictionary.yaml"
+METRIC_BUNDLE_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "metric_bundles.yaml"
 LEARNING_INBOX_DIR = Path(os.getenv("LEARNING_INBOX_DIR", Path(__file__).resolve().parents[3] / "runtime" / "learning_inbox"))
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TIME_SCOPE_RE = re.compile(r"^\d{6}$")
 _OVERVIEW_SOURCE_TABLES = {"ads_hotel_operation_overview_wide", "wddm_dim_overview_cockpit_f"}
 _DETAIL_SOURCE_TABLE = "vw_pnl_fact"
 _HOTEL_INFO_SOURCE_TABLE = "dim_hotel_info"
+_SCOPE_QUERY_OBJECT_TYPES = {"area_scope", "manage_corp_scope", "brand_scope", "filtered_scope"}
+_ANALYSIS_CONTRACT_BLOCK_METRICS: dict[str, list[str]] = {
+    "income_quality": ["TOTAL_INCOME", "ROOM_INCOME", "RESTAURANT_INCOME", "BANQUET_INCOME"],
+    "room_efficiency": ["ADR", "OCCUPANCY_RATE", "REVPAR"],
+    "profit_quality": ["OWNER_PROFIT", "OPERATING_PROFIT"],
+    "cost_efficiency": ["PEOPLE_COST", "ENERGY_EXPENSES", "RESTAURANT_COST"],
+}
 HTTP_CLIENT = httpx.Client(timeout=SERVICE_TIMEOUT, trust_env=False)
 
 app = FastAPI(title="ai-query-service")
@@ -61,6 +70,7 @@ class QueryContext(BaseModel):
     language: str = "zh-CN"
     external_benchmark: bool = False
     analysis_focus: str | None = None
+    conversation_context: dict | None = None
 
 
 class QueryRequest(BaseModel):
@@ -85,6 +95,35 @@ def load_app_settings() -> dict:
     with open(APP_SETTINGS, "r", encoding="utf-8") as f:
         settings = yaml.safe_load(f) or {}
     return settings if isinstance(settings, dict) else {}
+
+
+@lru_cache(maxsize=1)
+def load_metric_catalog() -> dict[str, dict]:
+    if not METRIC_DICTIONARY_CONFIG.exists():
+        return {}
+    with open(METRIC_DICTIONARY_CONFIG, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    items = data.get("metrics", []) if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        return {}
+    catalog: dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        metric_code = str(item.get("metric_code") or "").strip()
+        if metric_code:
+            catalog[metric_code] = item
+    return catalog
+
+
+@lru_cache(maxsize=1)
+def load_metric_bundles() -> dict[str, dict]:
+    if not METRIC_BUNDLE_CONFIG.exists():
+        return {}
+    with open(METRIC_BUNDLE_CONFIG, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    bundles = data.get("bundles", {}) if isinstance(data, dict) else {}
+    return bundles if isinstance(bundles, dict) else {}
 
 
 @app.get("/api/v1/system/settings")
@@ -195,21 +234,37 @@ def write_learning_sample(
     row_count: int | None = None,
     warnings: list[str] | None = None,
     extra: dict | None = None,
+    analysis_contract: dict | None = None,
+    analysis_blocks: list[dict] | None = None,
+    guardrail: dict | None = None,
+    trace_events: list[dict] | None = None,
 ) -> Path:
     LEARNING_INBOX_DIR.mkdir(parents=True, exist_ok=True)
     target = LEARNING_INBOX_DIR / f"learning-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.jsonl"
+    parsed_payload = parsed or {}
+    query_plan = parsed_payload.get("query_plan") if isinstance(parsed_payload.get("query_plan"), dict) else {}
+    resolved_analysis_contract = analysis_contract or (
+        query_plan.get("analysis_contract") if isinstance(query_plan.get("analysis_contract"), dict) else {}
+    )
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "trace_id": trace_id,
         "question": question,
         "stage": stage,
         "reason": reason,
-        "parsed_intent": parsed or {},
+        "review_status": "pending_review",
+        "parsed_intent": parsed_payload,
         "sql_text": sql_text,
         "rewritten_sql": rewritten_sql,
         "row_count": row_count,
         "warnings": warnings or [],
+        "analysis_contract": resolved_analysis_contract,
+        "analysis_blocks": analysis_blocks or [],
+        "guardrail": guardrail or {},
+        "trace_events": trace_events or [],
+        "alias_proposal": build_alias_proposal(question, parsed_payload, reason),
+        "eval_case_proposal": build_eval_case_proposal(question, parsed_payload, reason),
         "extra": extra or {},
     }
     with target.open("a", encoding="utf-8") as file:
@@ -335,9 +390,66 @@ def _metric_sql_contains(metric_code: str | None) -> list[str]:
     mapping = {
         "TOTAL_INCOME": ["wddm_dim_overview_cockpit_f", "TOTAL_INCOME_MTD_A"],
         "OPERATING_PROFIT": ["wddm_dim_overview_cockpit_f", "OPERATING_PROFIT_MTD_A"],
+        "OWNER_PROFIT": ["wddm_dim_overview_cockpit_f", "OWNER_PROFIT_MTD_A"],
         "OPERATING_HOTEL_COUNT": ["dim_hotel_info", "status = 1"],
     }
     return mapping.get(str(metric_code or "").strip(), [])
+
+
+def build_alias_proposal(question: str, parsed: dict | None, reason: str) -> dict[str, object]:
+    parsed = parsed or {}
+    terms: list[dict[str, object]] = []
+    candidates = [
+        ("hotel", parsed.get("requested_hotels", [])),
+        ("area", parsed.get("requested_areas", [])),
+        ("manage_corp", parsed.get("requested_manage_corps", [])),
+        ("brand_child", parsed.get("requested_brand_children", [])),
+    ]
+    for entity_type, values in candidates:
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                terms.append({"term": text, "entity_type": entity_type, "source": "parsed_intent"})
+    if not terms:
+        query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+        label = str(query_plan.get("query_object_label") or "").strip()
+        if label:
+            terms.append({"term": label, "entity_type": str(query_plan.get("query_object_type") or "scope"), "source": "query_plan"})
+    return {
+        "status": "proposed" if terms else "not_applicable",
+        "reason": reason,
+        "question": question,
+        "terms": terms,
+    }
+
+
+def build_eval_case_proposal(question: str, parsed: dict | None, reason: str, index: int = 1) -> dict[str, object]:
+    parsed = parsed or {}
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    metric_code = str(parsed.get("metric_code") or "").strip()
+    expected: dict[str, object] = {
+        "metric_code": metric_code,
+        "compare_mode": parsed.get("compare_mode"),
+        "time_scope": parsed.get("time_scope"),
+        "requested_hotels": parsed.get("requested_hotels", []),
+        "requested_areas": parsed.get("requested_areas", []),
+    }
+    for key in ("skill_id",):
+        if parsed.get(key):
+            expected[key] = parsed.get(key)
+    for key in ("query_object_type", "query_grain", "analysis_mode"):
+        if query_plan.get(key):
+            expected[key] = query_plan.get(key)
+    return {
+        "id": _case_id_from_question(question, index),
+        "question": question,
+        "time_scope": str(parsed.get("time_scope") or "202601"),
+        "reason": reason,
+        "expected": {key: value for key, value in expected.items() if value not in (None, "", [])},
+        "sql_assertions": {"contains": _metric_sql_contains(metric_code)},
+    }
 
 
 def build_harness_candidates(records: list[dict], limit: int = 10) -> list[dict[str, object]]:
@@ -356,6 +468,23 @@ def build_harness_candidates(records: list[dict], limit: int = 10) -> list[dict[
         extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
         metric_code = str(extra.get("metric_code") or parsed.get("metric_code") or "").strip() or None
         if not metric_code:
+            continue
+        proposal = record.get("eval_case_proposal") if isinstance(record.get("eval_case_proposal"), dict) else {}
+        if proposal:
+            candidate = {
+                **proposal,
+                "reason": proposal.get("reason") or record.get("reason"),
+                "source_trace_id": record.get("trace_id"),
+                "review_status": record.get("review_status", "pending_review"),
+                "notes": [
+                    f"generated_from_learning_reason={record.get('reason')}",
+                    f"generated_at={record.get('created_at_utc')}",
+                ],
+            }
+            candidates.append(candidate)
+            seen_questions.add(question)
+            if len(candidates) >= limit:
+                break
             continue
         expected: dict[str, object] = {
             "metric_code": metric_code,
@@ -582,6 +711,7 @@ def build_overview_query_parts(source_table: str) -> dict[str, str]:
             "hotel_search_filter": "CONCAT_WS('|', COALESCE(s.hotel_name_s, ''), COALESCE(s.hotel_name_f, ''), COALESCE(o.hotel_name, ''))",
             "area_filter": "s.area",
             "manage_corp_filter": "CONCAT_WS('|', COALESCE(o.manage_corp, ''), COALESCE(s.brand, ''))",
+            "manage_corp_select": "COALESCE(o.manage_corp, s.brand)",
             "brand_child_filter": "CONCAT_WS('|', COALESCE(o.hotel_brand, ''), COALESCE(s.brand_child, ''))",
             "builder_filter": "s.Builder",
             "brand_level_filter": "s.brand_level",
@@ -604,6 +734,7 @@ def build_overview_query_parts(source_table: str) -> dict[str, str]:
         "hotel_search_filter": "HOTEL_NAME_s",
         "area_filter": "area",
         "manage_corp_filter": "brand",
+        "manage_corp_select": "brand",
         "brand_child_filter": "brand_child",
         "builder_filter": "Builder",
         "brand_level_filter": "brand_level",
@@ -620,56 +751,263 @@ def build_overview_query_parts(source_table: str) -> dict[str, str]:
     }
 
 
-def overview_context_selects(query_parts: dict[str, str]) -> list[str]:
-    prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
-    dimension_fields = [
+def _query_plan(parsed: dict) -> dict:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    return query_plan if isinstance(query_plan, dict) else {}
+
+
+def _analysis_focus(parsed: dict) -> str:
+    query_plan = _query_plan(parsed)
+    return str(parsed.get("analysis_focus") or query_plan.get("analysis_focus") or "").strip()
+
+
+def _follow_up_mode(parsed: dict) -> str:
+    query_plan = _query_plan(parsed)
+    return str(query_plan.get("follow_up_mode") or "").strip()
+
+
+def _query_bundle_code(parsed: dict) -> str:
+    query_plan = _query_plan(parsed)
+    bundle_code = (
+        query_plan.get("metric_bundle_code")
+        or query_plan.get("report_template_code")
+        or query_plan.get("analysis_mode")
+        or ""
+    )
+    return str(bundle_code).strip()
+
+
+def _primary_metric_code(parsed: dict) -> str:
+    metric_code = str(parsed.get("metric_code") or "").strip()
+    return metric_code or "OWNER_PROFIT"
+
+
+def _analysis_contract_block_sequence(parsed: dict) -> list[str]:
+    query_plan = _query_plan(parsed)
+    analysis_contract = query_plan.get("analysis_contract") if isinstance(query_plan.get("analysis_contract"), dict) else {}
+    block_sequence = analysis_contract.get("block_sequence") if isinstance(analysis_contract, dict) else []
+    if not isinstance(block_sequence, list):
+        return []
+    blocks: list[str] = []
+    for item in block_sequence:
+        block = ""
+        if isinstance(item, dict):
+            block = str(
+                item.get("block")
+                or item.get("block_code")
+                or item.get("code")
+                or item.get("name")
+                or ""
+            ).strip()
+        else:
+            block = str(item or "").strip()
+        block = block.casefold()
+        if block and block not in blocks:
+            blocks.append(block)
+    return blocks
+
+
+def _analysis_contract_metric_codes(parsed: dict) -> list[str]:
+    codes: list[str] = []
+    for block in _analysis_contract_block_sequence(parsed):
+        for metric_code in _ANALYSIS_CONTRACT_BLOCK_METRICS.get(block, []):
+            code = str(metric_code).strip()
+            if code and code not in codes:
+                codes.append(code)
+    return codes
+
+
+def _query_route(parsed: dict) -> str:
+    query_plan = _query_plan(parsed)
+    query_object_type = str(query_plan.get("query_object_type") or "").strip()
+    query_grain = str(query_plan.get("query_grain") or "").strip()
+    if str(parsed.get("intent") or "").strip() == "explain":
+        return "explain_detail"
+    if str(parsed.get("metric_code") or "").strip() == "OPERATING_HOTEL_COUNT":
+        return "hotel_count_snapshot"
+    if query_grain == "portfolio":
+        if query_plan.get("group_by_dimensions"):
+            return "portfolio_group_breakdown"
+        if query_object_type in _SCOPE_QUERY_OBJECT_TYPES:
+            return "portfolio_scope_overview"
+        return "portfolio_overview"
+    if query_object_type in _SCOPE_QUERY_OBJECT_TYPES:
+        return "scope_detail"
+    if query_object_type == "single_hotel" or query_grain == "hotel":
+        return "single_hotel_detail"
+    return "detail"
+
+
+def _bundle_metric_codes(parsed: dict) -> list[str]:
+    primary = _primary_metric_code(parsed)
+    codes: list[str] = []
+    if primary:
+        codes.append(primary)
+
+    for metric_code in _analysis_contract_metric_codes(parsed):
+        if metric_code and metric_code not in codes:
+            codes.append(metric_code)
+    if len(codes) > (1 if primary else 0):
+        return codes
+
+    bundle_code = _query_bundle_code(parsed)
+    if not bundle_code:
+        bundle_code = "income_overview" if primary == "TOTAL_INCOME" else "operation_overview"
+    bundle = load_metric_bundles().get(bundle_code)
+    metrics = bundle.get("metrics", []) if isinstance(bundle, dict) else []
+    for item in metrics:
+        metric_code = str(item).strip()
+        if metric_code and metric_code not in codes:
+            codes.append(metric_code)
+    return codes
+
+
+def _bundle_metric_profiles(parsed: dict) -> list[dict[str, str]]:
+    profiles: list[dict[str, str]] = []
+    catalog = load_metric_catalog()
+    for metric_code in _bundle_metric_codes(parsed):
+        metric = catalog.get(metric_code)
+        if not isinstance(metric, dict):
+            continue
+        context_key = str(metric.get("context_key") or "").strip().lower()
+        if not context_key:
+            continue
+        period_fields = metric.get("period_fields", {})
+        period = str(parsed.get("period_type", "MTD")).strip() or "MTD"
+        fields = period_fields.get(period) if isinstance(period_fields, dict) else None
+        if not isinstance(fields, dict):
+            continue
+        actual_field = str(fields.get("actual") or "").strip()
+        budget_field = str(fields.get("budget") or "").strip()
+        last_year_field = str(fields.get("last_year") or "").strip()
+        if not actual_field:
+            continue
+        aggregation = str(metric.get("aggregation") or "").strip().lower()
+        if aggregation not in {"sum", "avg"}:
+            aggregation = "avg" if metric.get("non_additive") else "sum"
+        profiles.append(
+            {
+                "metric_code": metric_code,
+                "context_key": context_key,
+                "aggregation": aggregation,
+                "actual_field": actual_field,
+                "budget_field": budget_field,
+                "last_year_field": last_year_field,
+            }
+        )
+    return profiles
+
+
+def _detail_context_fields(query_parts: dict[str, str], parsed: dict) -> list[tuple[str, str]]:
+    route = _query_route(parsed)
+    base_fields = [
+        ("manage_corp", query_parts["manage_corp_select"]),
         ("brand", query_parts["brand_select"]),
         ("brand_child", query_parts["brand_child_select"]),
-        ("builder", query_parts["builder_select"]),
         ("brand_level", query_parts["brand_level_select"]),
         ("city_level", query_parts["city_level_select"]),
-        ("rooms", query_parts["rooms_select"]),
-        ("build_area", query_parts["build_area_select"]),
     ]
-    metric_fields = [
-        ("total_income_actual", "TOTAL_INCOME_MTD_A"),
-        ("total_income_budget", "TOTAL_INCOME_MTD_B"),
-        ("total_income_last_year", "TOTAL_INCOME_MTD_L"),
-        ("room_income_actual", "ROOM_INCOME_MTD_A"),
-        ("room_income_budget", "ROOM_INCOME_MTD_B"),
-        ("room_income_last_year", "ROOM_INCOME_MTD_L"),
-        ("restaurant_income_actual", "RESTAURANT_INCOME_MTD_A"),
-        ("restaurant_income_budget", "RESTAURANT_INCOME_MTD_B"),
-        ("restaurant_income_last_year", "RESTAURANT_INCOME_MTD_L"),
-        ("banquet_income_actual", "BANQUET_INCOME_MTD_A"),
-        ("banquet_income_budget", "BANQUET_INCOME_MTD_B"),
-        ("banquet_income_last_year", "BANQUET_INCOME_MTD_L"),
-        ("other_dept_income_actual", "OTHER_DEPT_INCOME_MTD_A"),
-        ("other_rate_income_actual", "OTHER_RATE_INCOME_MTD_A"),
-        ("operating_profit_actual", "OPERATING_PROFIT_MTD_A"),
-        ("operating_profit_budget", "OPERATING_PROFIT_MTD_B"),
-        ("operating_profit_last_year", "OPERATING_PROFIT_MTD_L"),
-        ("owner_profit_actual", "OWNER_PROFIT_MTD_A"),
-        ("room_profit_actual", "ROOM_PROFIT_MTD_A"),
-        ("restaurant_profit_actual", "RESTAURANT_PROFIT_MTD_A"),
-        ("rental_rooms_actual", "RENTAL_ROOMS_NUM_MTD_A"),
-        ("adr_actual", "AVE_HOUSE_PRICE_MTD_A"),
-        ("adr_budget", "AVE_HOUSE_PRICE_MTD_B"),
-        ("adr_last_year", "AVE_HOUSE_PRICE_MTD_L"),
-        ("occupancy_rate_actual", "OCCUPANCY_RATE_MTD_A"),
-        ("occupancy_rate_budget", "OCCUPANCY_RATE_MTD_B"),
-        ("occupancy_rate_last_year", "OCCUPANCY_RATE_MTD_L"),
-        ("revpar_actual", "INCOME_PER_ROOM_MTD_A"),
-        ("revpar_budget", "INCOME_PER_ROOM_MTD_B"),
-        ("revpar_last_year", "INCOME_PER_ROOM_MTD_L"),
+    if route == "single_hotel_detail":
+        base_fields.extend(
+            [
+                ("builder", query_parts["builder_select"]),
+                ("rooms", query_parts["rooms_select"]),
+                ("build_area", query_parts["build_area_select"]),
+            ]
+        )
+    seen_aliases: set[str] = set()
+    fields: list[tuple[str, str]] = []
+    for alias, expression in base_fields:
+        if alias in seen_aliases:
+            continue
+        fields.append((alias, expression))
+        seen_aliases.add(alias)
+    return fields
+
+
+def _metric_field_profile(parsed: dict) -> list[tuple[str, str]]:
+    dynamic_fields: list[tuple[str, str]] = []
+    seen_aliases: set[str] = set()
+    for profile in _bundle_metric_profiles(parsed):
+        for suffix, field_name in (
+            ("actual", profile.get("actual_field")),
+            ("budget", profile.get("budget_field")),
+            ("last_year", profile.get("last_year_field")),
+        ):
+            if not field_name:
+                continue
+            alias = f"{profile['context_key']}_{suffix}"
+            if alias in seen_aliases:
+                continue
+            dynamic_fields.append((alias, str(field_name)))
+            seen_aliases.add(alias)
+
+    extra_fields = [
         ("room_cost_actual", "ROOM_COST_MTD_A"),
-        ("restaurant_cost_actual", "RESTAURANT_COST_MTD_A"),
-        ("food_cost_actual", "FOOD_COST_MTD_A"),
-        ("wine_cost_actual", "WINE_COSE_MTD_A"),
         ("admin_expenses_actual", "ADMINI_EXPENSES_MTD_A"),
-        ("energy_expenses_actual", "ENERGY_EXPENSES_MTD_A"),
-        ("people_cost_actual", "PEOPLE_COST_MTD_A"),
     ]
+    if _query_bundle_code(parsed) not in {"group_dimension_overview", "executive_group_dimension"}:
+        extra_fields.extend(
+            [
+                ("room_profit_actual", "ROOM_PROFIT_MTD_A"),
+                ("restaurant_profit_actual", "RESTAURANT_PROFIT_MTD_A"),
+                ("rental_rooms_actual", "RENTAL_ROOMS_NUM_MTD_A"),
+                ("other_dept_income_actual", "OTHER_DEPT_INCOME_MTD_A"),
+                ("other_rate_income_actual", "OTHER_RATE_INCOME_MTD_A"),
+            ]
+        )
+    for alias, field_name in extra_fields:
+        if alias not in seen_aliases:
+            dynamic_fields.append((alias, field_name))
+            seen_aliases.add(alias)
+    return dynamic_fields
+
+
+def _portfolio_metric_fields(parsed: dict) -> list[tuple[str, str]]:
+    fields = _metric_field_profile(parsed)
+    # Portfolio/group results do not need builder/build-area style dimensions,
+    # but they do need enough metric context for narrative sections.
+    return fields
+
+
+def _aggregate_expression(prefix: str, field_name: str, aggregation: str) -> str:
+    safe_field = safe_identifier(field_name, "metric field")
+    if aggregation == "avg":
+        return f"AVG({prefix}{safe_field})"
+    return f"SUM({prefix}{safe_field})"
+
+
+def _portfolio_metric_select_sql(parsed: dict, prefix: str) -> str:
+    seen_aliases: set[str] = set()
+    parts: list[str] = []
+    aggregation_map = {profile["context_key"]: profile["aggregation"] for profile in _bundle_metric_profiles(parsed)}
+    for alias, field_name in _portfolio_metric_fields(parsed):
+        if alias in seen_aliases:
+            continue
+        context_key = alias.removesuffix("_actual").removesuffix("_budget").removesuffix("_last_year")
+        aggregation = aggregation_map.get(context_key, "sum")
+        parts.append(f"{_aggregate_expression(prefix, field_name, aggregation)} AS {alias}")
+        seen_aliases.add(alias)
+    return ",\n  ".join(parts)
+
+
+def _analysis_order_clause(parsed: dict, actual_expr: str, compare_expr: str) -> str:
+    analysis_focus = _analysis_focus(parsed)
+    follow_up_mode = _follow_up_mode(parsed)
+    compare_mode = str(parsed.get("compare_mode", "actual")).strip() or "actual"
+    if analysis_focus == "yoy_change" or compare_mode == "yoy":
+        return f"ORDER BY ABS(({actual_expr} - {compare_expr}) / NULLIF({compare_expr}, 0)) DESC"
+    if analysis_focus == "income_structure":
+        return f"ORDER BY {actual_expr} DESC"
+    if analysis_focus == "profit_cost_efficiency" or follow_up_mode == "driver" or analysis_focus == "driver_analysis":
+        return f"ORDER BY ABS({actual_expr} - {compare_expr}) DESC"
+    return f"ORDER BY ABS({actual_expr} - {compare_expr}) DESC"
+
+
+def overview_context_selects(query_parts: dict[str, str], parsed: dict) -> list[str]:
+    prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
+    dimension_fields = _detail_context_fields(query_parts, parsed)
+    metric_fields = _metric_field_profile(parsed)
     selects = [f"{expression} AS {alias}" for alias, expression in dimension_fields]
     selects.extend(f"{prefix}{field} AS {alias}" for alias, field in metric_fields)
     return selects
@@ -745,9 +1083,9 @@ def build_sql(
         where_clauses.append(f"{actual_field} > {compare_field}")
         order_clause = f"ORDER BY ({actual_field} - {compare_field}) DESC"
     else:
-        order_clause = f"ORDER BY ABS({actual_field} - {compare_field}) DESC"
+        order_clause = _analysis_order_clause(parsed, actual_field, compare_field)
 
-    context_select_sql = ",\n  ".join(overview_context_selects(query_parts))
+    context_select_sql = ",\n  ".join(overview_context_selects(query_parts, parsed))
     return f'''
 SELECT
   {query_parts["hotel_select"]} AS hotel_name,
@@ -760,7 +1098,6 @@ SELECT
 FROM {query_parts["from_clause"]}
 WHERE {" AND ".join(where_clauses)}
 {order_clause}
-LIMIT 50
 '''.strip()
 
 
@@ -858,48 +1195,13 @@ def build_portfolio_sql(
         or "组合汇总"
     ).strip() or "组合汇总"
     prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
+    metric_select_sql = _portfolio_metric_select_sql(parsed, prefix)
     return f'''
 SELECT
   {sql_literal(object_label)} AS hotel_name,
   {sql_literal(str((parsed.get("query_plan") or {}).get("query_object_type") or "portfolio"))} AS area,
-  COUNT(*) AS portfolio_member_count,
-  SUM({prefix}TOTAL_INCOME_MTD_A) AS total_income_actual,
-  SUM({prefix}TOTAL_INCOME_MTD_B) AS total_income_budget,
-  SUM({prefix}TOTAL_INCOME_MTD_L) AS total_income_last_year,
-  SUM({prefix}ROOM_INCOME_MTD_A) AS room_income_actual,
-  SUM({prefix}ROOM_INCOME_MTD_B) AS room_income_budget,
-  SUM({prefix}ROOM_INCOME_MTD_L) AS room_income_last_year,
-  SUM({prefix}RESTAURANT_INCOME_MTD_A) AS restaurant_income_actual,
-  SUM({prefix}RESTAURANT_INCOME_MTD_B) AS restaurant_income_budget,
-  SUM({prefix}RESTAURANT_INCOME_MTD_L) AS restaurant_income_last_year,
-  SUM({prefix}BANQUET_INCOME_MTD_A) AS banquet_income_actual,
-  SUM({prefix}BANQUET_INCOME_MTD_B) AS banquet_income_budget,
-  SUM({prefix}BANQUET_INCOME_MTD_L) AS banquet_income_last_year,
-  SUM({prefix}OTHER_DEPT_INCOME_MTD_A) AS other_dept_income_actual,
-  SUM({prefix}OTHER_RATE_INCOME_MTD_A) AS other_rate_income_actual,
-  SUM({prefix}OPERATING_PROFIT_MTD_A) AS operating_profit_actual,
-  SUM({prefix}OPERATING_PROFIT_MTD_B) AS operating_profit_budget,
-  SUM({prefix}OPERATING_PROFIT_MTD_L) AS operating_profit_last_year,
-  SUM({prefix}OWNER_PROFIT_MTD_A) AS owner_profit_actual,
-  SUM({prefix}ROOM_PROFIT_MTD_A) AS room_profit_actual,
-  SUM({prefix}RESTAURANT_PROFIT_MTD_A) AS restaurant_profit_actual,
-  SUM({prefix}RENTAL_ROOMS_NUM_MTD_A) AS rental_rooms_actual,
-  AVG({prefix}AVE_HOUSE_PRICE_MTD_A) AS adr_actual,
-  AVG({prefix}AVE_HOUSE_PRICE_MTD_B) AS adr_budget,
-  AVG({prefix}AVE_HOUSE_PRICE_MTD_L) AS adr_last_year,
-  AVG({prefix}OCCUPANCY_RATE_MTD_A) AS occupancy_rate_actual,
-  AVG({prefix}OCCUPANCY_RATE_MTD_B) AS occupancy_rate_budget,
-  AVG({prefix}OCCUPANCY_RATE_MTD_L) AS occupancy_rate_last_year,
-  AVG({prefix}INCOME_PER_ROOM_MTD_A) AS revpar_actual,
-  AVG({prefix}INCOME_PER_ROOM_MTD_B) AS revpar_budget,
-  AVG({prefix}INCOME_PER_ROOM_MTD_L) AS revpar_last_year,
-  SUM({prefix}ROOM_COST_MTD_A) AS room_cost_actual,
-  SUM({prefix}RESTAURANT_COST_MTD_A) AS restaurant_cost_actual,
-  SUM({prefix}FOOD_COST_MTD_A) AS food_cost_actual,
-  SUM({prefix}WINE_COSE_MTD_A) AS wine_cost_actual,
-  SUM({prefix}ADMINI_EXPENSES_MTD_A) AS admin_expenses_actual,
-  SUM({prefix}ENERGY_EXPENSES_MTD_A) AS energy_expenses_actual,
-  SUM({prefix}PEOPLE_COST_MTD_A) AS people_cost_actual,
+  COUNT(DISTINCT TRIM({query_parts["hotel_select"]})) AS portfolio_member_count,
+  {metric_select_sql},
   SUM({actual_field}) AS actual_value,
   SUM({compare_field}) AS compare_value,
   (SUM({actual_field}) - SUM({compare_field})) AS diff_value,
@@ -936,6 +1238,131 @@ def build_portfolio_breakdown(
     if not isinstance(detail_rows, list):
         return []
     return detail_rows[:5]
+
+
+def build_dimension_breakdown_sql(
+    metric_def: dict,
+    parsed: dict,
+    dimension: str,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> str:
+    source_table = safe_identifier(str(metric_def.get("source_table", "ads_hotel_operation_overview_wide")), "source_table")
+    query_parts = build_overview_query_parts(source_table)
+    period_fields = metric_def.get("period_fields", {})
+    if not isinstance(period_fields, dict) or not period_fields:
+        raise HTTPException(status_code=500, detail={"message": "metric definition is missing period_fields"})
+
+    requested_period = str(parsed.get("period_type", "MTD")).strip() or "MTD"
+    fields = period_fields.get(requested_period)
+    if not isinstance(fields, dict):
+        requested_period, fields = next(iter(period_fields.items()))
+    actual_field_name = safe_identifier(str(fields.get("actual", "")), "actual field")
+    compare_mode = str(parsed.get("compare_mode", "actual")).strip() or "actual"
+    if compare_mode == "yoy":
+        compare_source = fields.get("last_year") or fields.get("budget") or fields.get("actual")
+    elif compare_mode == "budget":
+        compare_source = fields.get("budget") or fields.get("last_year") or fields.get("actual")
+    else:
+        compare_source = fields.get("budget") or fields.get("last_year") or fields.get("actual")
+    compare_field_name = safe_identifier(str(compare_source), "compare field")
+
+    prefix = f"{query_parts['metric_prefix']}." if query_parts["metric_prefix"] else ""
+    actual_field = f"{prefix}{actual_field_name}"
+    compare_field = f"{prefix}{compare_field_name}"
+
+    dimension_selects = {
+        "manage_corp": [("manage_corp", query_parts["manage_corp_select"])],
+        "area": [("area", query_parts["area_filter"])],
+        "brand_child": [("brand_child", query_parts["brand_child_select"])],
+        "manage_corp_area": [
+            ("manage_corp", query_parts["manage_corp_select"]),
+            ("area", query_parts["area_filter"]),
+        ],
+    }
+    selected_dimensions = dimension_selects.get(dimension)
+    if not selected_dimensions:
+        raise HTTPException(status_code=400, detail={"message": "unsupported group_by dimension", "dimension": dimension})
+
+    time_scope = str(parsed.get("time_scope", "")).strip()
+    if not _TIME_SCOPE_RE.fullmatch(time_scope):
+        raise HTTPException(status_code=400, detail={"message": "invalid time_scope", "time_scope": time_scope})
+
+    where_clauses = [f"{query_parts['time_field']} = {sql_literal(time_scope)}"]
+    area_scope = [str(area).strip() for area in (requested_areas or []) if str(area).strip()]
+    if area_scope:
+        where_clauses.append(f"{query_parts['area_filter']} IN ({', '.join(sql_literal(area) for area in area_scope)})")
+
+    for parsed_key, query_key in [
+        ("requested_manage_corps", "manage_corp_filter"),
+        ("requested_brand_children", "brand_child_filter"),
+        ("requested_builders", "builder_filter"),
+        ("requested_brand_levels", "brand_level_filter"),
+        ("requested_city_levels", "city_level_filter"),
+    ]:
+        clause = dimension_scope_clause(query_parts[query_key], [str(item).strip() for item in parsed.get(parsed_key, []) if str(item).strip()])
+        if clause:
+            where_clauses.append(clause)
+
+    explicit_hotel_scope = [str(hotel).strip() for hotel in (requested_hotels or []) if str(hotel).strip()]
+    if explicit_hotel_scope:
+        hotel_clause = hotel_scope_clause(query_parts.get("hotel_search_filter", query_parts["hotel_filter"]), explicit_hotel_scope)
+        if hotel_clause:
+            where_clauses.append(hotel_clause)
+
+    hotel_scope = [str(hotel).strip() for hotel in (allowed_hotels or []) if str(hotel).strip()]
+    if hotel_scope and hotel_scope != ["ALL"]:
+        where_clauses.append(f"{query_parts['hotel_filter']} IN ({', '.join(sql_literal(hotel) for hotel in hotel_scope)})")
+
+    dimension_sql = ",\n  ".join(
+        f"COALESCE(NULLIF(TRIM({expression}), ''), '未标注') AS {alias}"
+        for alias, expression in selected_dimensions
+    )
+    # Group by select positions to avoid alias/name collisions such as manage_corp
+    # resolving to a source column instead of the projected expression in DuckDB.
+    group_by_sql = ", ".join(str(index) for index in range(1, len(selected_dimensions) + 1))
+    metric_select_sql = _portfolio_metric_select_sql(parsed, prefix)
+
+    order_clause = _analysis_order_clause(parsed, f"SUM({actual_field})", f"SUM({compare_field})")
+    return f"""
+SELECT
+  {dimension_sql},
+  COUNT(*) AS hotel_count,
+  {metric_select_sql},
+  SUM({actual_field}) AS actual_value,
+  SUM({compare_field}) AS compare_value,
+  (SUM({actual_field}) - SUM({compare_field})) AS diff_value,
+  (SUM({actual_field}) - SUM({compare_field})) / NULLIF(SUM({compare_field}), 0) AS diff_rate
+FROM {query_parts["from_clause"]}
+WHERE {" AND ".join(where_clauses)}
+GROUP BY {group_by_sql}
+{order_clause}
+LIMIT 100
+""".strip()
+
+
+def build_dimension_breakdowns(
+    metric_def: dict,
+    parsed: dict,
+    allowed_hotels: list[str] | None = None,
+    requested_hotels: list[str] | None = None,
+    requested_areas: list[str] | None = None,
+) -> dict[str, list[dict]]:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    dimensions = [str(item).strip() for item in query_plan.get("group_by_dimensions", []) if str(item).strip()]
+    breakdowns: dict[str, list[dict]] = {}
+    for dimension in dimensions:
+        sql = build_dimension_breakdown_sql(metric_def, parsed, dimension, allowed_hotels, requested_hotels, requested_areas)
+        result = request_json(
+            "POST",
+            f"{DB_EXECUTOR_SERVICE_URL}/api/v1/db/query",
+            {"sql": sql},
+            stage=f"db-executor-dimension-breakdown-{dimension}",
+        )
+        rows = result.get("rows", [])
+        breakdowns[dimension] = rows if isinstance(rows, list) else []
+    return breakdowns
 
 
 def _unique_non_empty(rows: list[dict], key: str) -> list[str]:
@@ -1084,8 +1511,8 @@ def build_portfolio_outliers(rows: list[dict]) -> dict[str, dict[str, object]] |
             "worst": pick_min(rows, "diff_value"),
         },
         "profit": {
-            "best": pick_max(rows, "operating_profit_actual"),
-            "worst": pick_min(rows, "operating_profit_actual"),
+            "best": pick_max(rows, "owner_profit_actual") or pick_max(rows, "operating_profit_actual"),
+            "worst": pick_min(rows, "owner_profit_actual") or pick_min(rows, "operating_profit_actual"),
         },
         "cost": {
             "best": pick_min(rows, "people_cost_actual"),
@@ -1450,6 +1877,9 @@ def build_quick_filters(parsed: dict, rows: list[dict], portfolio_breakdown: lis
     display_rows = portfolio_breakdown or rows
     query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
     query_object_label = str(query_plan.get("query_object_label") or "").strip()
+    analysis_focus = _analysis_focus(parsed)
+    follow_up_mode = _follow_up_mode(parsed)
+    query_route = _query_route(parsed)
 
     def unique_values(values: list[object], limit: int = 3) -> list[str]:
         items: list[str] = []
@@ -1471,6 +1901,7 @@ def build_quick_filters(parsed: dict, rows: list[dict], portfolio_breakdown: lis
         ]
     )
     brands = unique_values(list(parsed.get("requested_brand_children", [])) + [row.get("brand_child") for row in display_rows])
+    manage_corps = unique_values(list(parsed.get("requested_manage_corps", [])) + [row.get("manage_corp") for row in display_rows])
     months = unique_values(
         [
             shift_month_label(parsed.get("time_scope"), -1),
@@ -1489,22 +1920,64 @@ def build_quick_filters(parsed: dict, rows: list[dict], portfolio_breakdown: lis
         ]
         if not item["active"]
     ][:2]
-    mode_items = [
-        item
-        for item in [
+    if query_route in {"portfolio_group_breakdown", "portfolio_scope_overview", "portfolio_overview"}:
+        mode_candidates = [
             {"label": "组合总览", "prompt": "改看组合总览", "active": analysis_mode == "portfolio_overview"},
-            {"label": "归因分析", "prompt": "继续展开原因", "active": analysis_mode == "driver_analysis"},
             {"label": "经营摘要", "prompt": "换成经营摘要", "active": analysis_mode == "management_report"},
+            {"label": "归因分析", "prompt": "继续展开原因", "active": analysis_mode == "driver_analysis"},
         ]
-        if not item["active"]
-    ][:2]
+    elif query_route == "single_hotel_detail":
+        mode_candidates = [
+            {"label": "经营摘要", "prompt": "换成经营摘要", "active": analysis_mode == "management_report"},
+            {"label": "归因分析", "prompt": "继续展开原因", "active": analysis_mode == "driver_analysis"},
+            {"label": "组合总览", "prompt": "改看组合总览", "active": analysis_mode == "portfolio_overview"},
+        ]
+    else:
+        mode_candidates = [
+            {"label": "经营摘要", "prompt": "换成经营摘要", "active": analysis_mode == "management_report"},
+            {"label": "归因分析", "prompt": "继续展开原因", "active": analysis_mode == "driver_analysis"},
+            {"label": "组合总览", "prompt": "改看组合总览", "active": analysis_mode == "portfolio_overview"},
+        ]
+    mode_items = [item for item in mode_candidates if not item["active"]][:2]
+
+    if analysis_focus == "driver_analysis" or follow_up_mode == "driver":
+        focus_candidates = [
+            {"label": "收入结构", "prompt": "分析收入结构", "active": False},
+            {"label": "利润成本", "prompt": "看利润和成本效率", "active": False},
+            {"label": "同比变化", "prompt": "看同比变化", "active": False},
+            {"label": "继续原因", "prompt": "继续展开原因", "active": True},
+        ]
+    elif analysis_focus == "yoy_change":
+        focus_candidates = [
+            {"label": "继续原因", "prompt": "继续展开原因", "active": False},
+            {"label": "收入结构", "prompt": "分析收入结构", "active": False},
+            {"label": "利润成本", "prompt": "看利润和成本效率", "active": False},
+            {"label": "同比变化", "prompt": "看同比变化", "active": True},
+        ]
+    elif analysis_focus == "income_structure":
+        focus_candidates = [
+            {"label": "继续原因", "prompt": "继续展开原因", "active": False},
+            {"label": "利润成本", "prompt": "看利润和成本效率", "active": False},
+            {"label": "同比变化", "prompt": "看同比变化", "active": False},
+            {"label": "收入结构", "prompt": "分析收入结构", "active": True},
+        ]
+    else:
+        focus_candidates = [
+            {"label": "收入结构", "prompt": "分析收入结构", "active": analysis_focus == "income_structure"},
+            {"label": "利润成本", "prompt": "看利润和成本效率", "active": analysis_focus == "profit_cost_efficiency"},
+            {"label": "同比变化", "prompt": "看同比变化", "active": analysis_focus == "yoy_change"},
+            {"label": "继续原因", "prompt": "继续展开原因", "active": follow_up_mode == "driver" or analysis_focus == "driver_analysis"},
+        ]
+    focus_items = [item for item in focus_candidates if not item["active"]][:3]
     groups_by_label = {
         "区域": {"label": "区域", "items": [{"label": item, "prompt": f"只看{item}"} for item in areas]},
         "酒店": {"label": "酒店", "items": [{"label": item, "prompt": f"只看{item}"} for item in hotels]},
+        "管理公司": {"label": "管理公司", "items": [{"label": item, "prompt": f"只看{item}"} for item in manage_corps]},
         "月份": {"label": "月份", "items": [{"label": item, "prompt": f"切到{item}"} for item in months]},
         "品牌": {"label": "品牌", "items": [{"label": item, "prompt": f"只看{item}品牌"} for item in brands]},
         "口径": {"label": "口径", "items": [{"label": item["label"], "prompt": item["prompt"]} for item in compare_items]},
         "分析方式": {"label": "分析方式", "items": [{"label": item["label"], "prompt": item["prompt"]} for item in mode_items]},
+        "进一步": {"label": "进一步", "items": [{"label": item["label"], "prompt": item["prompt"]} for item in focus_items]},
     }
 
     object_type = str(query_plan.get("query_object_type") or "").strip()
@@ -1515,13 +1988,13 @@ def build_quick_filters(parsed: dict, rows: list[dict], portfolio_breakdown: lis
     is_portfolio = query_plan.get("query_grain") == "portfolio" or object_type in {"hotel_group", "manage_corp_scope", "brand_scope"}
 
     if is_single_hotel:
-        template = ["月份", "口径", "分析方式", "品牌", "区域"]
-    elif is_area_scope and not is_single_hotel:
-        template = ["酒店", "品牌", "月份", "分析方式", "口径"]
+        template = ["月份", "口径", "进一步", "分析方式", "品牌", "区域", "管理公司"]
     elif is_portfolio:
-        template = ["区域", "品牌", "酒店", "分析方式", "月份", "口径"]
+        template = ["管理公司", "区域", "品牌", "酒店", "进一步", "分析方式", "月份", "口径"]
+    elif is_area_scope and not is_single_hotel:
+        template = ["酒店", "品牌", "月份", "进一步", "分析方式", "口径", "管理公司"]
     else:
-        template = ["月份", "口径", "分析方式", "区域", "酒店", "品牌"]
+        template = ["月份", "口径", "进一步", "分析方式", "管理公司", "区域", "酒店", "品牌"]
 
     ordered_groups = [groups_by_label[label] for label in template if groups_by_label.get(label, {}).get("items")]
     remaining_groups = [
@@ -1529,6 +2002,269 @@ def build_quick_filters(parsed: dict, rows: list[dict], portfolio_breakdown: lis
         if label not in template and group.get("items")
     ]
     return ordered_groups + remaining_groups
+
+
+def build_follow_up_prompts(parsed: dict, rows: list[dict], portfolio_breakdown: list[dict]) -> list[dict[str, object]]:
+    display_rows = portfolio_breakdown or rows
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    query_route = _query_route(parsed)
+    analysis_focus = _analysis_focus(parsed)
+    follow_up_mode = _follow_up_mode(parsed)
+    compare_mode = str(parsed.get("compare_mode") or "actual").strip()
+
+    def unique_values(values: list[object], limit: int = 3) -> list[str]:
+        items: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in items:
+                continue
+            items.append(text)
+            if len(items) >= limit:
+                break
+        return items
+
+    areas = unique_values(list(parsed.get("requested_areas", [])) + [row.get("area") for row in display_rows])
+    hotels = unique_values(
+        [
+            row.get("hotel_name")
+            for row in display_rows
+            if str(row.get("hotel_name") or "").strip() and str(row.get("hotel_name") or "").strip() != str(query_plan.get("query_object_label") or "").strip()
+        ]
+    )
+    brands = unique_values(list(parsed.get("requested_brand_children", [])) + [row.get("brand_child") for row in display_rows])
+    manage_corps = unique_values(list(parsed.get("requested_manage_corps", [])) + [row.get("manage_corp") for row in display_rows])
+
+    prompts: list[dict[str, object]] = []
+    if analysis_focus == "driver_analysis" or follow_up_mode == "driver":
+        prompts.append({"label": "继续原因", "prompt": "继续展开原因"})
+    elif analysis_focus == "income_structure":
+        prompts.append({"label": "收入结构", "prompt": "分析收入结构"})
+    elif analysis_focus == "profit_cost_efficiency":
+        prompts.append({"label": "利润成本", "prompt": "看利润和成本效率"})
+    elif analysis_focus == "yoy_change" or compare_mode == "yoy":
+        prompts.append({"label": "同比变化", "prompt": "看同比变化"})
+
+    if query_route in {"portfolio_group_breakdown", "portfolio_scope_overview", "portfolio_overview"}:
+        for label, values, suffix in (
+            ("管理公司", manage_corps, ""),
+            ("区域", areas, ""),
+            ("品牌", brands, "品牌"),
+            ("酒店", hotels, ""),
+        ):
+            if values:
+                prompt = f"只看{values[0]}{suffix}"
+                prompts.append({"label": label, "prompt": prompt})
+    elif query_route in {"scope_detail", "single_hotel_detail"}:
+        for label, values, suffix in (
+            ("酒店", hotels, ""),
+            ("区域", areas, ""),
+            ("品牌", brands, "品牌"),
+            ("管理公司", manage_corps, ""),
+        ):
+            if values:
+                prompt = f"只看{values[0]}{suffix}"
+                prompts.append({"label": label, "prompt": prompt})
+
+    seen: set[str] = set()
+    ordered: list[dict[str, object]] = []
+    for item in prompts:
+        prompt_text = str(item.get("prompt") or "").strip()
+        if not prompt_text or prompt_text in seen:
+            continue
+        seen.add(prompt_text)
+        ordered.append(item)
+        if len(ordered) >= 4:
+            break
+    return ordered
+
+
+def _narrative_brief_from_explanation(explanation: dict | None, fallback_summary: str) -> str:
+    explanation = explanation if isinstance(explanation, dict) else {}
+    management_summary = explanation.get("management_summary") if isinstance(explanation.get("management_summary"), list) else []
+    for item in management_summary:
+        text = str(item or "").strip()
+        if text:
+            return text
+    summary = str(explanation.get("summary") or "").strip()
+    if summary:
+        return summary
+    report_sections = explanation.get("report_sections") if isinstance(explanation.get("report_sections"), list) else []
+    for section in report_sections:
+        if not isinstance(section, dict):
+            continue
+        content = str(section.get("content") or "").strip()
+        if content:
+            return content
+    fallback_text = str(fallback_summary or "").strip()
+    if fallback_text:
+        return fallback_text
+    return "当前没有可用的结构化解释结果。"
+
+
+def _analysis_blocks_from_explanation(explanation: dict | None, fallback_summary: str) -> list[dict[str, object]]:
+    explanation = explanation if isinstance(explanation, dict) else {}
+    blocks: list[dict[str, object]] = []
+    report_sections = explanation.get("report_sections") if isinstance(explanation.get("report_sections"), list) else []
+    for index, section in enumerate(report_sections, start=1):
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or f"分析块{index}").strip() or f"分析块{index}"
+        content = str(section.get("content") or "").strip()
+        if not content:
+            continue
+        block: dict[str, object] = {
+            "block_id": f"section_{index}",
+            "block_type": "report_section",
+            "title": title,
+            "content": content,
+            "source": "explanation.report_sections",
+        }
+        if section.get("items") is not None:
+            block["items"] = section.get("items")
+        blocks.append(block)
+    if blocks:
+        return blocks
+
+    management_summary = explanation.get("management_summary") if isinstance(explanation.get("management_summary"), list) else []
+    for index, item in enumerate(management_summary, start=1):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        blocks.append(
+            {
+                "block_id": f"management_summary_{index}",
+                "block_type": "management_summary",
+                "title": f"管理层摘要{index}",
+                "content": text,
+                "source": "explanation.management_summary",
+            }
+        )
+    if blocks:
+        return blocks
+
+    narrative_brief = _narrative_brief_from_explanation(explanation, fallback_summary)
+    return [
+        {
+            "block_id": "summary",
+            "block_type": "fallback_summary",
+            "title": "经营摘要",
+            "content": narrative_brief,
+            "source": "fallback",
+        }
+    ]
+
+
+def build_trace_events(
+    *,
+    timings: dict[str, int],
+    parsed: dict,
+    sql_plan: dict,
+    explanation_payload: dict,
+    warnings: list[str],
+) -> list[dict[str, object]]:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    analysis_agent = explanation_payload.get("analysis_agent") if isinstance(explanation_payload.get("analysis_agent"), dict) else {}
+    narrative_agent = explanation_payload.get("narrative_agent") if isinstance(explanation_payload.get("narrative_agent"), dict) else {}
+    guardrail = narrative_agent.get("guardrail") if isinstance(narrative_agent.get("guardrail"), dict) else {}
+    events: list[dict[str, object]] = [
+        {
+            "stage": "parse_intent",
+            "status": "completed",
+            "duration_ms": int(timings.get("semantic_ms") or 0),
+            "metadata": {
+                "analysis_mode": query_plan.get("analysis_mode"),
+                "analysis_focus": query_plan.get("analysis_focus"),
+                "metric_bundle_code": query_plan.get("metric_bundle_code"),
+                "report_template_code": query_plan.get("report_template_code"),
+            },
+        },
+        {
+            "stage": "sql_guardrail",
+            "status": "completed" if sql_plan.get("safe", True) else "blocked",
+            "duration_ms": int(timings.get("sql_guardrail_ms") or 0),
+            "metadata": {
+                "safe": bool(sql_plan.get("safe", True)),
+                "warnings": sql_plan.get("warnings", []),
+            },
+        },
+        {
+            "stage": "execute_sql",
+            "status": "completed",
+            "duration_ms": int(timings.get("db_executor_ms") or 0),
+            "metadata": {},
+        },
+        {
+            "stage": "build_analysis_blocks",
+            "status": "completed" if analysis_agent else "fallback",
+            "duration_ms": int(timings.get("explanation_ms") or 0),
+            "metadata": {
+                "agent": analysis_agent.get("agent"),
+                "contract_version": analysis_agent.get("contract_version"),
+            },
+        },
+        {
+            "stage": "build_narrative_brief",
+            "status": "completed" if narrative_agent else "fallback",
+            "duration_ms": int(timings.get("explanation_ms") or 0),
+            "metadata": {
+                "agent": narrative_agent.get("agent"),
+                "contract_version": narrative_agent.get("contract_version"),
+                "guardrail_status": guardrail.get("status"),
+            },
+        },
+    ]
+    if warnings:
+        events.append(
+            {
+                "stage": "pipeline_warnings",
+                "status": "warning",
+                "duration_ms": 0,
+                "metadata": {"warnings": warnings},
+            }
+        )
+    return events
+
+
+def expected_portfolio_member_count(parsed: dict) -> int:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    try:
+        planned_count = int(query_plan.get("resolved_hotel_count") or 0)
+    except (TypeError, ValueError):
+        planned_count = 0
+    if planned_count > 0:
+        return planned_count
+
+    resolved_entities = parsed.get("resolved_entities") if isinstance(parsed.get("resolved_entities"), dict) else {}
+    for key in ("hotel_group", "scope_collection"):
+        entity = resolved_entities.get(key) if isinstance(resolved_entities.get(key), dict) else {}
+        try:
+            member_count = int(entity.get("member_count") or 0)
+        except (TypeError, ValueError):
+            member_count = 0
+        if member_count > 0:
+            return member_count
+    return 0
+
+
+def incomplete_portfolio_quality(parsed: dict, rows: list[dict]) -> dict[str, object] | None:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    if query_plan.get("query_grain") != "portfolio":
+        return None
+    expected_count = expected_portfolio_member_count(parsed)
+    if expected_count <= 0 or not rows or not isinstance(rows[0], dict):
+        return None
+    try:
+        actual_count = int(rows[0].get("portfolio_member_count") or 0)
+    except (TypeError, ValueError):
+        actual_count = 0
+    if actual_count == expected_count:
+        return None
+    return {
+        "status": "mismatch",
+        "expected_hotel_count": expected_count,
+        "actual_hotel_count": actual_count,
+        "policy": "suppress_incomplete_aggregate",
+    }
 
 
 @app.post("/api/v1/ai/query")
@@ -1549,7 +2285,11 @@ def ai_query(payload: QueryRequest):
     parsed = request_json(
         "POST",
         f"{SEMANTIC_SERVICE_URL}/api/v1/semantic/parse",
-        {"question": payload.question, "time_scope": payload.context.time_scope},
+        {
+            "question": payload.question,
+            "time_scope": payload.context.time_scope,
+            "conversation_context": payload.context.conversation_context,
+        },
         stage="semantic",
     )
     if payload.context.analysis_focus:
@@ -1601,6 +2341,7 @@ def ai_query(payload: QueryRequest):
         and bool(parsed.get("time_scope_explicit"))
     )
     source_table = "wddm_dim_overview_cockpit_f" if use_monthly_hotel_count else metric_source_table
+    query_route = _query_route(parsed)
     sql_text = (
         build_monthly_hotel_count_sql(
             parsed,
@@ -1630,7 +2371,7 @@ def ai_query(payload: QueryRequest):
             resolved_requested_hotels,
             parsed.get("requested_areas", []),
         )
-        if query_plan.get("query_grain") == "portfolio"
+        if query_route.startswith("portfolio")
         else build_sql(
             metric_def,
             parsed,
@@ -1685,15 +2426,70 @@ def ai_query(payload: QueryRequest):
             status_code=502,
             detail={"trace_id": trace_id, "stage": "db-executor", "message": "invalid rows payload"},
         )
-    if query_plan.get("query_grain") == "portfolio" and rows:
+    if query_route.startswith("portfolio") and rows:
         first_portfolio_row = rows[0] if isinstance(rows[0], dict) else {}
         if int(first_portfolio_row.get("portfolio_member_count") or 0) <= 0:
             rows = []
+    data_quality = incomplete_portfolio_quality(parsed, rows)
+    if data_quality:
+        expected_count = int(data_quality["expected_hotel_count"])
+        actual_count = int(data_quality["actual_hotel_count"])
+        warnings.append("data_incomplete_suppressed")
+        summary = (
+            f"当前数据完整性未通过：应覆盖 {expected_count} 家酒店，当前账期取到 {actual_count} 家。"
+            "为避免错误汇总，已停止展示经营汇总。"
+        )
+        explanation_payload = {
+            "summary": summary,
+            "management_summary": [summary],
+            "risks": ["数据完整性未通过校验，本次不展示经营指标、排名或汇总数。"],
+            "suggestions": ["请先核对本月数据同步范围，再重新发起全量汇总。"],
+            "report_sections": [{"title": "数据完整性", "content": summary}],
+        }
+        timings["explanation_ms"] = 0
+        timings["audit_ms"] = 0
+        timings["total_ms"] = elapsed_ms(request_started)
+        trace_events = build_trace_events(
+            timings=timings,
+            parsed=parsed,
+            sql_plan=sql_plan,
+            explanation_payload=explanation_payload,
+            warnings=warnings,
+        )
+        return {
+            "trace_id": trace_id,
+            "summary": summary,
+            "narrative_brief": summary,
+            "analysis_blocks": _analysis_blocks_from_explanation(explanation_payload, summary),
+            "trace_events": trace_events,
+            "parsed_intent": parsed,
+            "metric_definition": metric_def,
+            "sql_plan": sql_plan,
+            "auth_scope": auth_scope,
+            "data_source": data_source,
+            "data_points": [],
+            "portfolio_member_count": None,
+            "portfolio_breakdown": [],
+            "portfolio_outliers": None,
+            "dimension_breakdowns": {},
+            "query_route": query_route,
+            "quick_filters": [],
+            "follow_up_prompts": [],
+            "internal_benchmark": None,
+            "external_benchmark": None,
+            "external_benchmark_requested": payload.context.external_benchmark,
+            "explanation": explanation_payload,
+            "data_quality": data_quality,
+            "warnings": warnings,
+            "performance": timings,
+        }
     row_count = len(rows)
+    data_quality = {"status": "complete"} if query_route.startswith("portfolio") else {"status": "not_applicable"}
     internal_benchmark = None
     portfolio_breakdown: list[dict] = []
     portfolio_outliers: dict[str, dict[str, object]] | None = None
-    if query_plan.get("query_grain") == "portfolio" and resolved_requested_hotels:
+    dimension_breakdowns: dict[str, list[dict]] = {}
+    if query_route.startswith("portfolio"):
         try:
             portfolio_breakdown = build_portfolio_breakdown(
                 metric_def,
@@ -1710,7 +2506,18 @@ def ai_query(payload: QueryRequest):
                 internal_benchmark = build_portfolio_internal_benchmark(rows, portfolio_breakdown, metric_def, parsed)
             except HTTPException as exc:
                 warnings.append(f"portfolio benchmark fallback: {exc.detail}")
-    if parsed.get("intent") != "explain" and rows and query_plan.get("query_grain") != "portfolio":
+        if query_plan.get("group_by_dimensions"):
+            try:
+                dimension_breakdowns = build_dimension_breakdowns(
+                    metric_def,
+                    parsed,
+                    auth_scope.get("allowed_hotels", []),
+                    resolved_requested_hotels,
+                    parsed.get("requested_areas", []),
+                )
+            except HTTPException as exc:
+                warnings.append(f"dimension breakdown fallback: {exc.detail}")
+    if parsed.get("intent") != "explain" and rows and not query_route.startswith("portfolio"):
         try:
             internal_benchmark = build_internal_benchmark(rows, metric_def, parsed)
         except HTTPException as exc:
@@ -1742,6 +2549,7 @@ def ai_query(payload: QueryRequest):
                     "rows": rows,
                     "portfolio_breakdown": portfolio_breakdown,
                     "portfolio_outliers": portfolio_outliers,
+                    "dimension_breakdowns": dimension_breakdowns,
                     "peer_benchmark": internal_benchmark,
                     "external_benchmark_requested": payload.context.external_benchmark,
                 },
@@ -1755,6 +2563,18 @@ def ai_query(payload: QueryRequest):
             explanation_payload = {}
             warnings.append(f"explanation fallback: {exc.detail}")
 
+    trace_events = build_trace_events(
+        timings=timings,
+        parsed=parsed,
+        sql_plan=sql_plan,
+        explanation_payload=explanation_payload,
+        warnings=warnings,
+    )
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    analysis_contract = query_plan.get("analysis_contract") if isinstance(query_plan.get("analysis_contract"), dict) else {}
+    narrative_agent = explanation_payload.get("narrative_agent") if isinstance(explanation_payload.get("narrative_agent"), dict) else {}
+    guardrail = narrative_agent.get("guardrail") if isinstance(narrative_agent.get("guardrail"), dict) else {}
+
     reason = learning_reason(parsed, rows, warnings)
     if reason:
         write_learning_sample(
@@ -1767,6 +2587,10 @@ def ai_query(payload: QueryRequest):
             rewritten_sql=sql_plan.get("rewritten_sql"),
             row_count=row_count,
             warnings=warnings,
+            analysis_contract=analysis_contract,
+            analysis_blocks=_analysis_blocks_from_explanation(explanation_payload, summary),
+            guardrail=guardrail,
+            trace_events=trace_events,
             extra=_learning_metadata(
                 parsed,
                 external_benchmark_requested=payload.context.external_benchmark,
@@ -1814,10 +2638,16 @@ def ai_query(payload: QueryRequest):
     if portfolio_member_count in (None, "", 0) and isinstance(parsed.get("query_plan"), dict):
         portfolio_member_count = parsed["query_plan"].get("resolved_hotel_count")
     quick_filters = build_quick_filters(parsed, rows, portfolio_breakdown)
+    follow_up_prompts = build_follow_up_prompts(parsed, rows, portfolio_breakdown)
+    analysis_blocks = _analysis_blocks_from_explanation(explanation_payload, summary)
+    narrative_brief = _narrative_brief_from_explanation(explanation_payload, summary)
 
     return {
         "trace_id": trace_id,
         "summary": summary,
+        "narrative_brief": narrative_brief,
+        "analysis_blocks": analysis_blocks,
+        "trace_events": trace_events,
         "parsed_intent": parsed,
         "metric_definition": metric_def,
         "sql_plan": sql_plan,
@@ -1827,11 +2657,15 @@ def ai_query(payload: QueryRequest):
         "portfolio_member_count": portfolio_member_count,
         "portfolio_breakdown": portfolio_breakdown,
         "portfolio_outliers": portfolio_outliers,
+        "dimension_breakdowns": dimension_breakdowns,
+        "query_route": query_route,
         "quick_filters": quick_filters,
+        "follow_up_prompts": follow_up_prompts,
         "internal_benchmark": internal_benchmark,
         "external_benchmark": external_benchmark,
         "external_benchmark_requested": payload.context.external_benchmark,
         "explanation": explanation_payload,
+        "data_quality": data_quality,
         "warnings": warnings,
         "performance": timings,
     }
@@ -1855,6 +2689,8 @@ def ai_report(payload: ReportRequest):
     return {
         "trace_id": result.get("trace_id"),
         "summary": report_summary,
+        "narrative_brief": result.get("narrative_brief"),
+        "analysis_blocks": result.get("analysis_blocks", []),
         "report_sections": sections,
         "report_markdown": "\n\n".join(markdown_lines),
         "source_query": {

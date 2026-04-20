@@ -1,0 +1,380 @@
+templates:
+  executive_portfolio:
+    name: 管理层组合汇总模板
+    applies_to:
+      analysis_modes:
+        - portfolio_overview
+        - management_report
+    include_sections:
+      - 分析范围
+      - 组合经营摘要
+      - 经营总览
+      - 管理公司/区域汇总
+      - 收入质量
+      - 客房效率
+      - 利润质量
+      - 成本效率
+      - 重点酒店与梯队
+      - 横向对标与继续追问
+      - 结论
+    focus_section_order:
+      management_report:
+        - 分析范围
+        - 组合经营摘要
+        - 经营总览
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 重点酒店与梯队
+        - 横向对标与继续追问
+        - 结论
+      portfolio_overview:
+        - 分析范围
+        - 组合经营摘要
+        - 经营总览
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 重点酒店与梯队
+        - 横向对标与继续追问
+        - 结论
+      driver_analysis:
+        - 分析范围
+        - 经营总览
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 重点酒店与梯队
+        - 横向对标与继续追问
+        - 结论
+      yoy_change:
+        - 分析范围
+        - 经营总览
+        - 组合经营摘要
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标与继续追问
+        - 结论
+      scope_refinement:
+        - 分析范围
+        - 经营总览
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标与继续追问
+        - 结论
+    analysis_block_order:
+      default:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - portfolio_watchlist
+        - benchmark
+      management_report:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - portfolio_watchlist
+        - benchmark
+      portfolio_overview:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - portfolio_watchlist
+        - benchmark
+      driver_analysis:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - portfolio_watchlist
+        - benchmark
+      yoy_change:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - portfolio_watchlist
+        - benchmark
+      scope_refinement:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+    section_order:
+      - 分析范围
+      - 组合经营摘要
+      - 经营总览
+      - 管理公司/区域汇总
+      - 收入质量
+      - 客房效率
+      - 利润质量
+      - 成本效率
+      - 重点酒店与梯队
+      - 横向对标与继续追问
+      - 结论
+
+  executive_group_dimension:
+    name: 管理层分维度汇总模板
+    applies_to:
+      analysis_modes:
+        - group_by_dimension_report
+    include_sections:
+      - 分析范围
+      - 分维度经营摘要
+      - 管理公司/区域汇总
+      - 收入质量
+      - 客房效率
+      - 利润质量
+      - 成本效率
+      - 横向对标与继续追问
+      - 结论
+    focus_section_order:
+      management_report:
+        - 分析范围
+        - 分维度经营摘要
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标与继续追问
+        - 结论
+      dimension_comparison:
+        - 分析范围
+        - 分维度经营摘要
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标与继续追问
+        - 结论
+      driver_analysis:
+        - 分析范围
+        - 分维度经营摘要
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标与继续追问
+        - 结论
+      yoy_change:
+        - 分析范围
+        - 分维度经营摘要
+        - 管理公司/区域汇总
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+        - 横向对标与继续追问
+        - 结论
+    analysis_block_order:
+      default:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      management_report:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      dimension_comparison:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      driver_analysis:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      yoy_change:
+        - scope_overview
+        - dimension_summary
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+    section_order:
+      - 分析范围
+      - 分维度经营摘要
+      - 管理公司/区域汇总
+      - 收入质量
+      - 客房效率
+      - 利润质量
+      - 成本效率
+      - 横向对标与继续追问
+      - 结论
+
+  executive_hotel_snapshot:
+    name: 单店经营快照模板
+    applies_to:
+      analysis_modes:
+        - hotel_metric_snapshot
+    include_sections:
+      - 分析范围
+      - 经营结果
+      - 问题归因
+      - 横向对标
+      - 结论
+      - 收入质量
+      - 客房效率
+      - 利润质量
+      - 成本效率
+    focus_section_order:
+      income_structure:
+        - 分析范围
+        - 经营结果
+        - 收入质量
+        - 问题归因
+        - 横向对标
+        - 结论
+        - 客房效率
+        - 利润质量
+        - 成本效率
+      profit_cost_efficiency:
+        - 分析范围
+        - 经营结果
+        - 利润质量
+        - 成本效率
+        - 问题归因
+        - 横向对标
+        - 结论
+        - 收入质量
+        - 客房效率
+      management_report:
+        - 分析范围
+        - 经营结果
+        - 问题归因
+        - 横向对标
+        - 结论
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+      driver_analysis:
+        - 分析范围
+        - 问题归因
+        - 经营结果
+        - 横向对标
+        - 结论
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+      yoy_change:
+        - 分析范围
+        - 经营结果
+        - 问题归因
+        - 横向对标
+        - 结论
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+      scope_refinement:
+        - 分析范围
+        - 经营结果
+        - 问题归因
+        - 横向对标
+        - 结论
+        - 收入质量
+        - 客房效率
+        - 利润质量
+        - 成本效率
+    analysis_block_order:
+      default:
+        - scope_overview
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      income_structure:
+        - scope_overview
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      profit_cost_efficiency:
+        - scope_overview
+        - profit_quality
+        - cost_efficiency
+        - income_quality
+        - room_efficiency
+        - benchmark
+      driver_analysis:
+        - scope_overview
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      yoy_change:
+        - scope_overview
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+      scope_refinement:
+        - scope_overview
+        - income_quality
+        - room_efficiency
+        - profit_quality
+        - cost_efficiency
+        - benchmark
+    section_order:
+      - 分析范围
+      - 经营结果
+      - 问题归因
+      - 横向对标
+      - 结论
+      - 收入质量
+      - 客房效率
+      - 利润质量
+      - 成本效率

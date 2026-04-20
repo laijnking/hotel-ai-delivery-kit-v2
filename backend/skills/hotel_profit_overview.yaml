@@ -1,8 +1,8 @@
 id: hotel_profit_overview
-name: 单店经营利润情况
+name: 单店业主利润情况
 version: 1
 enabled: true
-description: 回答单个酒店或区域某月份经营利润表现，默认与预算对比。
+description: 回答单个酒店或区域某月份利润表现，默认以 NOP业主净利润为锚点并与去年同期对比；用户明确说经营利润或 GOP 时仍应走经营利润（GOP）。
 
 triggers:
   - 经营利润情况
@@ -12,11 +12,15 @@ triggers:
   - 经营情况
   - 经营状况
   - 经营表现
+  - 经营摘要
+  - 继续展开原因
+  - 切到区域维度
+  - 切到管理公司维度
 
 defaults:
   intent: query
-  metric_code: OPERATING_PROFIT
-  compare_mode: budget
+  metric_code: OWNER_PROFIT
+  compare_mode: yoy
   variance_direction: all
   period_type: MTD
 
@@ -37,8 +41,8 @@ answer_template: metric_query_mobile
 examples:
   - question: 看一下江门嘉华酒店3月的经营情况
     expected:
-      metric_code: OPERATING_PROFIT
-      compare_mode: budget
+      metric_code: OWNER_PROFIT
+      compare_mode: yoy
       time_scope: "202603"
       requested_hotels:
         - 江门嘉华

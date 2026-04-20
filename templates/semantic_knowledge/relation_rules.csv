@@ -1,0 +1,4 @@
+entity_a,entity_a_type,entity_b,entity_b_type,relation,is_valid_combination,notes
+江门嘉华,hotel,华南区,area,belongs_to,1,
+北京万丽,hotel,华南区,area,conflicts_with,0,若用户同时指定需澄清
+嘉华,brand_child,万达品牌,manage_corp,managed_by,1,

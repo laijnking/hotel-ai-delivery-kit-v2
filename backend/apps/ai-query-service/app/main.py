@@ -85,6 +85,11 @@ class ReportRequest(BaseModel):
     auth: AuthInfo = Field(default_factory=AuthInfo)
 
 
+class IntentPreviewRequest(BaseModel):
+    question: str = Field(..., min_length=2)
+    context: QueryContext = Field(default_factory=QueryContext)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -135,9 +140,9 @@ def system_settings():
         "deep_model": os.getenv("QWEN_DEEP_MODEL", "").strip() or os.getenv("QWEN_MODEL", "").strip() or None,
         "llm_base_url": os.getenv("QWEN_API_BASE_URL", "").strip() or None,
         "timeout_seconds": os.getenv("QWEN_TIMEOUT", "").strip() or None,
-        "parse_policy": os.getenv("QWEN_PARSE_POLICY", "auto").strip() or "auto",
+        "parse_policy": os.getenv("QWEN_PARSE_POLICY", "always").strip() or "always",
         "parse_confidence_threshold": os.getenv("QWEN_PARSE_CONFIDENCE_THRESHOLD", "0.82").strip() or "0.82",
-        "explanation_policy": os.getenv("QWEN_EXPLANATION_POLICY", "off").strip() or "off",
+        "explanation_policy": os.getenv("QWEN_EXPLANATION_POLICY", "auto").strip() or "auto",
     }
     return {
         "quick_questions": settings.get("quick_questions", []),
@@ -169,6 +174,140 @@ def system_learning_harness_candidates(days: int = 7, limit: int = 10):
         "candidate_count": len(candidates),
         "candidates": candidates,
     }
+
+
+def _preview_metric_label(metric_code: str) -> str:
+    metric = load_metric_catalog().get(metric_code, {})
+    if isinstance(metric, dict):
+        name = str(metric.get("name_cn") or "").strip()
+        if name:
+            return name
+    return metric_code or "待识别指标"
+
+
+def _preview_compare_label(compare_mode: str) -> str:
+    return {
+        "actual": "当前口径",
+        "budget": "预算对比",
+        "yoy": "同比观察",
+    }.get(compare_mode, compare_mode or "系统默认")
+
+
+def _preview_intent_label(intent: str) -> str:
+    return {
+        "query": "经营问答",
+        "report": "经营摘要",
+        "explain": "原因分析",
+        "rank": "排名观察",
+    }.get(intent, intent or "待识别意图")
+
+
+def _semantic_draft_stats(parsed: dict) -> tuple[str | None, int]:
+    draft = parsed.get("semantic_draft") if isinstance(parsed.get("semantic_draft"), dict) else {}
+    source = str(draft.get("source") or "").strip() or None
+    candidates = draft.get("candidates") if isinstance(draft.get("candidates"), dict) else {}
+    return source, len(candidates)
+
+
+def _preview_analysis_mode_label(query_plan: dict) -> str:
+    analysis_mode = str(query_plan.get("analysis_mode") or "").strip()
+    return {
+        "portfolio_overview": "组合总览",
+        "management_report": "管理摘要",
+        "driver_analysis": "归因分析",
+        "group_by_dimension_report": "分维度汇总",
+        "hotel_metric_snapshot": "单点快照",
+    }.get(analysis_mode, analysis_mode or "系统判断")
+
+
+def _preview_conversation_action(parsed: dict, question: str) -> str:
+    conversation_action = str(parsed.get("conversation_action") or "").strip()
+    if conversation_action == "follow_up_continue":
+        return "继续原因" if str(parsed.get("intent") or "").strip() == "explain" else "承接追问"
+    if conversation_action == "refine_scope":
+        return "缩小范围"
+    if conversation_action == "shift_compare_mode":
+        return "切换口径"
+    if conversation_action == "management_summary":
+        return "生成摘要"
+    follow_up_mode = str(parsed.get("follow_up_mode") or "").strip()
+    if follow_up_mode == "driver":
+        return "继续原因"
+    if follow_up_mode == "refine_scope":
+        return "缩小范围"
+    if follow_up_mode == "compare_shift":
+        return "切换口径"
+    if follow_up_mode == "continue":
+        return "承接追问"
+    if str(parsed.get("intent") or "").strip() == "report":
+        return "生成摘要"
+    if str(parsed.get("intent") or "").strip() == "explain":
+        return "展开分析"
+    return "发起新问题" if question.strip() else "等待输入"
+
+
+def _preview_scope_label(parsed: dict) -> str:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    label = str(query_plan.get("query_object_label") or "").strip()
+    if label:
+        return label
+    for field in ("requested_hotels", "requested_areas", "requested_manage_corps", "requested_brand_children"):
+        values = parsed.get(field)
+        if isinstance(values, list) and values:
+            cleaned = [str(item).strip() for item in values if str(item).strip()]
+            if cleaned:
+                return " / ".join(cleaned[:2])
+    return "当前管理范围"
+
+
+def build_intent_preview(parsed: dict, question: str) -> dict:
+    query_plan = parsed.get("query_plan") if isinstance(parsed.get("query_plan"), dict) else {}
+    parse_debug = parsed.get("parse_debug") if isinstance(parsed.get("parse_debug"), dict) else {}
+    clarification_options = parsed.get("clarification_options") if isinstance(parsed.get("clarification_options"), list) else []
+    route_mode = str(parsed.get("route_mode") or "").strip() or ("fast_llm_parse" if parse_debug.get("llm_used") else "deterministic")
+    preview = {
+        "intent": _preview_intent_label(str(parsed.get("intent") or "").strip()),
+        "metric": _preview_metric_label(str(parsed.get("metric_code") or "").strip()),
+        "scope": _preview_scope_label(parsed),
+        "time_scope": parsed.get("time_scope") if isinstance(parsed.get("time_scope"), str) else "",
+        "compare_mode": _preview_compare_label(str(parsed.get("compare_mode") or "").strip()),
+        "analysis_mode": _preview_analysis_mode_label(query_plan),
+        "conversation_action": _preview_conversation_action(parsed, question),
+    }
+    summary = (
+        str(parsed.get("clarification_question") or "").strip()
+        if parsed.get("needs_clarification")
+        else f"我理解你是想看 {preview['scope']} 的 {preview['metric']}，按 {preview['compare_mode']} 来做 {preview['analysis_mode']}。"
+    )
+    return {
+        "question": question,
+        "route_mode": route_mode,
+        "needs_clarification": bool(parsed.get("needs_clarification")),
+        "clarification_type": str(parsed.get("clarification_type") or "").strip() or None,
+        "clarification_question": str(parsed.get("clarification_question") or "").strip() or None,
+        "clarification_options": [str(item).strip() for item in clarification_options if str(item).strip()][:4],
+        "summary": summary,
+        "semantic_notes": [str(item).strip() for item in parsed.get("semantic_notes", []) if str(item).strip()] if isinstance(parsed.get("semantic_notes"), list) else [],
+        "preview": preview,
+        "parsed_intent": parsed,
+    }
+
+
+@app.post("/api/v1/ai/intent-preview")
+def intent_preview(payload: IntentPreviewRequest):
+    parsed = request_json(
+        "POST",
+        f"{SEMANTIC_SERVICE_URL}/api/v1/semantic/parse",
+        {
+            "question": payload.question,
+            "time_scope": payload.context.time_scope,
+            "conversation_context": payload.context.conversation_context,
+        },
+        stage="semantic-preview",
+    )
+    if payload.context.analysis_focus:
+        parsed["analysis_focus"] = payload.context.analysis_focus
+    return build_intent_preview(parsed, payload.question)
 
 
 def request_json(method: str, url: str, payload: dict | None = None, stage: str = "upstream") -> dict:
@@ -295,6 +434,8 @@ def _learning_metadata(
         "requested_manage_corps": parsed.get("requested_manage_corps", []),
         "requested_brand_children": parsed.get("requested_brand_children", []),
         "external_benchmark_requested": external_benchmark_requested,
+        "semantic_draft_source": _semantic_draft_stats(parsed)[0],
+        "semantic_draft_candidate_count": _semantic_draft_stats(parsed)[1],
     }
     if isinstance(internal_benchmark, dict):
         metadata["internal_benchmark_scope"] = internal_benchmark.get("scope_used")
@@ -2172,6 +2313,11 @@ def build_trace_events(
             "status": "completed",
             "duration_ms": int(timings.get("semantic_ms") or 0),
             "metadata": {
+                "semantic_draft_source": _semantic_draft_stats(parsed)[0],
+                "semantic_draft_candidate_count": _semantic_draft_stats(parsed)[1],
+                "route_mode": parsed.get("route_mode"),
+                "conversation_action": parsed.get("conversation_action"),
+                "clarification_type": parsed.get("clarification_type"),
                 "analysis_mode": query_plan.get("analysis_mode"),
                 "analysis_focus": query_plan.get("analysis_focus"),
                 "metric_bundle_code": query_plan.get("metric_bundle_code"),

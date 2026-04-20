@@ -1,0 +1,4 @@
+entity_type,canonical_name,alias,alias_type,notes
+manage_corp,万达品牌,万达,short_name,
+hotel,广州丽思卡尔顿酒店,广州丽思,short_name,
+brand_child,丽思卡尔顿,丽思,short_name,

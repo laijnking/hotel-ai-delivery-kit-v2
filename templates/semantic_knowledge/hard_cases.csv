@@ -1,0 +1,3 @@
+user_question,wrong_parse_example,correct_parse,why_it_is_tricky,notes
+看万豪3月收入情况,"识别成单店酒店","更可能是品牌/子品牌范围","万豪既可能是品牌也可能出现在酒店名称里",
+继续,"直接沿用上文执行","若无上下文锚点应先澄清","短句高度依赖上下文",

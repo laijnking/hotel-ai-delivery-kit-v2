@@ -1,0 +1,4 @@
+user_question,expected_intent,expected_metric_code,expected_scope,expected_time_scope,expected_compare_mode,expected_analysis_mode,expected_clarification_if_any,notes
+看一下江门嘉华酒店3月的经营情况,query,OWNER_PROFIT,江门嘉华,202603,yoy,hotel_metric_snapshot,,
+只看华南区本月收入情况,query,TOTAL_INCOME,华南区,,yoy,portfolio_overview,,
+继续展开原因,explain,,继承上文,,继承上文,driver_analysis,若无上下文需澄清,

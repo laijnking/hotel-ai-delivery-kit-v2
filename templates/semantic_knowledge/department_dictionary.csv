@@ -1,0 +1,6 @@
+department_name,aliases,category,notes
+其他营收部门,,pnl_department,auto_generated_from_vw_pnl_fact
+固定成本,,pnl_department,auto_generated_from_vw_pnl_fact
+客房部,,pnl_department,auto_generated_from_vw_pnl_fact
+管理部门,,pnl_department,auto_generated_from_vw_pnl_fact
+餐饮部,,pnl_department,auto_generated_from_vw_pnl_fact

@@ -1,0 +1,117 @@
+account_code,account_name,level_1,level_2,is_cost,is_total,aliases,notes
+1001,Total Salaries & Wages 薪资合计,酒店薪资及福利,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+1002,Total Benefits 福利合计,酒店薪资及福利,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+1003,"Total Hotel Wages & Benefits
+  酒店薪资及福利合计 (%/总收入)",酒店薪资及福利,经营指标,1,0,,auto_generated_from_vw_pnl_fact
+1003,Total Hotel Wages & Benefits 酒店薪资及福利合计 (%/总收入),酒店薪资及福利,经营指标,1,0,,auto_generated_from_vw_pnl_fact
+101,Rooms客房部收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+102,Food & Beverage餐饮部收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+103,Outlet 餐厅收入,收入,收入2,0,0,,auto_generated_from_vw_pnl_fact
+104,Banquet 宴会收入,收入,收入2,0,0,,auto_generated_from_vw_pnl_fact
+105,Other Operated Dept其它营业部门收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+106,Rentals and Other Income其它收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+107,Total Revenue 收入合计 (%/总收入),收入,汇总,0,1,,auto_generated_from_vw_pnl_fact
+201,Food食品成本,成本,营业成本,1,0,,auto_generated_from_vw_pnl_fact
+202,Beverage酒水成本,成本,营业成本,0,0,,auto_generated_from_vw_pnl_fact
+203,F&B - Misc. Cost其他成本,成本,营业成本,0,0,,auto_generated_from_vw_pnl_fact
+204,Other Operated Dept. 其它营业部门成本,成本,营业成本,0,0,,auto_generated_from_vw_pnl_fact
+205,Total Cost of Sales 营业成本合计 (%/总收入),成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+301,Rooms客房部,成本,薪资及福利,0,0,,auto_generated_from_vw_pnl_fact
+302,Food & Beverage餐饮部,成本,薪资及福利,0,0,,auto_generated_from_vw_pnl_fact
+303,Other Operated Dept. 其它营业部门,成本,薪资及福利,0,0,,auto_generated_from_vw_pnl_fact
+304,Total Wages & Benefits 薪资福利合计 (%/总收入),成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+310000,Total Revenue总收入合计,收入,汇总,0,1,,auto_generated_from_vw_pnl_fact
+401,Rooms客房部-其它费用,成本,其它费用,1,0,,auto_generated_from_vw_pnl_fact
+402,Food & Beverage餐饮部-其它费用,成本,其它费用,0,0,,auto_generated_from_vw_pnl_fact
+403,Other Operated Dept. 其它营业部门-其它费用,成本,其它费用,0,0,,auto_generated_from_vw_pnl_fact
+404,Total Other Expenses 其它费用合计 (%/总收入),成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+501,Rooms客房,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+502,Food & Beverage餐饮,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+503,Other Operated Dept.其它营业部门,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+504,Rentals and Other Income其它收入,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+505,Total Dept. Profit 部门利润合计 (%/总收入),利润,汇总,0,0,,auto_generated_from_vw_pnl_fact
+601,General & Administrative行政部门,成本,未分配费用,0,0,,auto_generated_from_vw_pnl_fact
+602,Sales & Marketing市场销售部,成本,未分配费用,0,0,,auto_generated_from_vw_pnl_fact
+603,Property Operation & Maintenance工程部,成本,未分配费用,1,0,,auto_generated_from_vw_pnl_fact
+604,Utilities能源,成本,未分配费用,1,0,,auto_generated_from_vw_pnl_fact
+605,"Total Undistributed Op. Exps
+ 未分配费用合计 (%/总收入)",成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+605,Total Undistributed Op. Exps 未分配费用合计 (%/总收入),成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+607,营业毛利 (%/总收入),利润,营业毛利,0,0,,auto_generated_from_vw_pnl_fact
+608,检核,,,0,0,,auto_generated_from_vw_pnl_fact
+669000,Utilities能源,成本,未分配费用,1,0,,auto_generated_from_vw_pnl_fact
+700100,基本管理费,成本,固定成本,1,0,,auto_generated_from_vw_pnl_fact
+700200,Management Fee - Incentive 奖励管理费,成本,固定成本,1,0,,auto_generated_from_vw_pnl_fact
+700201,Owner Insurance 业主保险,成本,固定成本,0,0,,auto_generated_from_vw_pnl_fact
+700202,Replacement Reserves 固定资产及设备储备金,成本,固定成本,1,0,,auto_generated_from_vw_pnl_fact
+700203,Other Non-operating Expenses 非经营性费用,成本,固定成本,0,0,,auto_generated_from_vw_pnl_fact
+700210,Other income 其他收益,成本,固定成本,0,0,,auto_generated_from_vw_pnl_fact
+700290,Total Fixed Charges固定成本合计,成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+701,Management Fee-Basic 基本管理费,成本,固定成本,1,0,,auto_generated_from_vw_pnl_fact
+702,Management Fee - Incentive 奖励管理费,成本,固定成本,1,0,,auto_generated_from_vw_pnl_fact
+703,General Liability Insurance 公众责任险等,成本,固定成本,0,0,,auto_generated_from_vw_pnl_fact
+704,Replacement Reserves 固定资产及设备储备金,成本,固定成本,1,0,,auto_generated_from_vw_pnl_fact
+705,Other Expenses 其它固定费用,成本,固定成本,0,0,,auto_generated_from_vw_pnl_fact
+706,Total Fixed Charges 固定成本合计 (%/总收入),成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+708,Net Operating Profit  经营净利润,利润,经营净利润,0,0,,auto_generated_from_vw_pnl_fact
+708,Net Operating Profit 经营净利润,利润,经营净利润,0,0,,auto_generated_from_vw_pnl_fact
+710,Owner Expenses 业主费用,,,0,0,,auto_generated_from_vw_pnl_fact
+712,重要指标,,,0,0,,auto_generated_from_vw_pnl_fact
+801,Rooms - Sold 实际出租房间数,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+802,Comp Rooms 免费房,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+803,House Use 自用房,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+804,Rooms Occupied 实际入住房间数,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+805,Available Rooms 可出租房间数,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+806,Number of Guests 客人人数,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+807,Occ% 出租率,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+808,Average Room Rate 平均房价,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+809,RevPar 每间可卖房收入,客房部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+901,Covers 就餐人数,餐饮部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+902,Average Food Check 食品人均消费,餐饮部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+903,Food Cost % 食品成本率%,餐饮部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+904,Beverage Cost % 饮品成本率%,餐饮部,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+908100,Available Rooms 可出租房间数,,,0,0,,auto_generated_from_vw_pnl_fact
+908100,Available Rooms 可出租房间数,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+908110,Number of Guests 客人人数,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+908115,Rooms Occupied 实际入住房间数,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+908118,Rooms - Sold 实际出租房间数,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+908120,Comp Rooms 免费房,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+908135,House Use 自用房,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+920100,Covers 就餐人数,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+999998,业主回报,利润,经营净利润,0,0,,auto_generated_from_vw_pnl_fact
+M11420,业主利润,,,0,0,,auto_generated_from_vw_pnl_fact
+M11421,考核口径业主利润,,,0,0,,auto_generated_from_vw_pnl_fact
+M11480,Benefits 福利,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+M11490,Total Salaries & Wages 薪资合计,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+SPL002,Rooms客房部收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+SPL003,Food & Beverage餐饮部收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+SPL004,Other Operated Dept其它营业部门收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+SPL005,Rentals and Other Income其它收入,收入,收入,0,0,,auto_generated_from_vw_pnl_fact
+SPL021,Other Operated Dept. 其它营业部门成本,成本,营业成本,0,0,,auto_generated_from_vw_pnl_fact
+SPL022,F&B - Misc. Cost其他成本,成本,营业成本,0,0,,auto_generated_from_vw_pnl_fact
+SPL023,Food食品成本,成本,营业成本,1,0,,auto_generated_from_vw_pnl_fact
+SPL024,Beverage酒水成本,成本,营业成本,0,0,,auto_generated_from_vw_pnl_fact
+SPL025,Total Cost of Sales营业成本合计,成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+SPL031,Rooms客房部,成本,薪资及福利,0,0,,auto_generated_from_vw_pnl_fact
+SPL032,Food & Beverage餐饮部,成本,薪资及福利,0,0,,auto_generated_from_vw_pnl_fact
+SPL033,Other Operated Dept. 其它营业部门,成本,薪资及福利,0,0,,auto_generated_from_vw_pnl_fact
+SPL035,Total Wages & Benefits合计,成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+SPL041,Rooms客房部-其它费用,成本,其它费用,1,0,,auto_generated_from_vw_pnl_fact
+SPL042,Food & Beverage餐饮部-其它费用,成本,其它费用,0,0,,auto_generated_from_vw_pnl_fact
+SPL043,Other Operated Dept. 其它营业部门-其它费用,成本,其它费用,0,0,,auto_generated_from_vw_pnl_fact
+SPL044,Total Other Expenses合计,成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+SPL051,Rooms客房,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+SPL052,Food & Beverage餐饮,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+SPL053,Other Operated Dept.其它营业部门,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+SPL054,Rentals and Other Income其它收入,利润,部门利润,0,0,,auto_generated_from_vw_pnl_fact
+SPL055,Total Dept. Profit合计,利润,汇总,0,0,,auto_generated_from_vw_pnl_fact
+SPL056,营业毛利,利润,营业毛利,0,0,,auto_generated_from_vw_pnl_fact
+SPL061,General & Administrative行政部门,成本,未分配费用,0,0,,auto_generated_from_vw_pnl_fact
+SPL062,Sales & Marketing市场销售部,成本,未分配费用,0,0,,auto_generated_from_vw_pnl_fact
+SPL063,Property Operation & Maintenance工程部,成本,未分配费用,1,0,,auto_generated_from_vw_pnl_fact
+SPL064,Total Undistributed Op. Exps管理部门费用,成本,汇总,0,1,,auto_generated_from_vw_pnl_fact
+SPL071,Hotel Lease and Other Owner Expenses酒店房租及其他业主费用,成本,固定成本,0,0,,auto_generated_from_vw_pnl_fact
+SPL091,Rooms-Summary客房部汇总,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+SPL092,Food & Beverage Department餐饮部,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+SPL093,Other Departments其它部门,经营指标,经营指标,0,0,,auto_generated_from_vw_pnl_fact
+SUMPLTOTWB,Total Wages & Benefits 薪资及福利合计,经营指标,经营指标,1,0,,auto_generated_from_vw_pnl_fact

@@ -47,6 +47,29 @@ test.beforeEach(async ({ page }) => {
   });
 
   await page.route("**/api/v1/ai/**", async (route) => {
+    if (route.request().url().includes("/ai/intent-preview")) {
+      const payload = route.request().postDataJSON?.() || {};
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          route_mode: "fast_llm_parse",
+          needs_clarification: false,
+          summary: "我理解你是想看 mock酒店 的总收入，按 预算对比 来做 单点快照。",
+          preview: {
+            intent: "经营问答",
+            metric: "总收入",
+            scope: payload.question?.includes("华南区") ? "华南区" : "mock酒店",
+            time_scope: "202603",
+            compare_mode: "预算对比",
+            analysis_mode: "单点快照",
+            conversation_action: payload.question?.includes("只看") ? "缩小范围" : "发起新问题"
+          },
+          clarification_options: []
+        })
+      });
+      return;
+    }
     const isReport = route.request().url().includes("/ai/report");
     const payload = route.request().postDataJSON?.() || {};
     const focus = payload.context?.analysis_focus;
@@ -219,6 +242,13 @@ test("发送后会先展示识别口径和阶段进度", async ({ page }) => {
   await expect(page.getByText("读取经营数据", { exact: true })).toBeVisible();
 
   await waitForAssistantResult(page, 1);
+});
+
+test("输入问题时会先展示小模型语义预解析", async ({ page }) => {
+  await page.getByTestId("composer-input").fill("看一下江门嘉华酒店3月的经营情况");
+  await expect(page.getByTestId("intent-preview-panel")).toBeVisible();
+  await expect(page.getByTestId("intent-preview-strip")).toContainText("mock酒店");
+  await expect(page.getByTestId("intent-preview-panel")).toContainText("总收入");
 });
 
 test("快捷提问按钮逐个点击都能返回结果", async ({ page }) => {

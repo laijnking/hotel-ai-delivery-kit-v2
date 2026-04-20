@@ -1,0 +1,5 @@
+conversation_action,inherit_metric,inherit_scope,inherit_time_scope,inherit_compare_mode,requires_confirmation,notes
+follow_up_continue,1,1,1,1,0,继续展开原因默认继承上文
+refine_scope,1,0,1,1,0,只替换范围字段
+shift_compare_mode,1,1,1,0,0,只替换对比口径
+management_summary,1,1,1,1,0,生成摘要通常继承上文

@@ -1,0 +1,3 @@
+metric_code,name_cn,aliases,definition,default_compare_mode,supported_scopes,supported_analysis_modes,negative_keywords,positive_keywords,notes
+OWNER_PROFIT,NOP业主净利润,"经营情况|经营表现|业主利润","面向业主口径的净利润指标",yoy,"hotel|portfolio","snapshot|management_report|driver_analysis","下滑|偏低|承压","增长|改善|提升",
+TOTAL_INCOME,总收入,"收入|营收|营业收入","酒店整体收入指标",yoy,"hotel|portfolio","snapshot|management_report|dimension_comparison","下降|偏低","增长|提升",

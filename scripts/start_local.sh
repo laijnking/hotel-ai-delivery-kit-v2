@@ -13,6 +13,9 @@ if [[ ! -x "$PYTHON" ]]; then
   exit 1
 fi
 
+export QWEN_PARSE_POLICY="${QWEN_PARSE_POLICY:-always}"
+export QWEN_EXPLANATION_POLICY="${QWEN_EXPLANATION_POLICY:-auto}"
+
 start_backend() {
   local service="$1"
   local port="$2"

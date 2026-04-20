@@ -30,6 +30,8 @@
   结合业务汇报材料，对现有问答框架升级为经营分析编排框架的专题方案。
 - `02_ARCHITECTURE_EVOLUTION/PROJECT_ITERATION_PLAN.md`
   当前项目迭代计划、阶段优先级和验收样例。
+- `02_ARCHITECTURE_EVOLUTION/SEMANTIC_ROUTING_EXECUTION_CHECKLIST.md`
+  语义路由重构的可实施任务清单，包含批次拆分、代码落点和验收方式。
 - `02_ARCHITECTURE_EVOLUTION/REPORT_TEMPLATE_REVISION_PLAN.md`
   常用经营报告驱动的报告模板化修订方案。
 - `02_ARCHITECTURE_EVOLUTION/PHASE_ROADMAP_REVIEW.md`
@@ -41,6 +43,8 @@
   业务维度识别层与语义维度扩展。
 - `03_SEMANTIC_AND_MODEL/LLM_REASONING_BOUNDARY.md`
   规则、维度图谱与大模型推理边界。
+- `03_SEMANTIC_AND_MODEL/SEMANTIC_ROUTING_REFACTOR_PLAN.md`
+  面向前端自由提问场景的语义路由重构方案，重点说明为何从 `rule-first` 调整为 `LLM-first + guardrail`。
 - `03_SEMANTIC_AND_MODEL/SKILL_HARNESS_EVOLUTION_PLAN.md`
   Skill / Harness 自学习架构演进方案。
 - `03_SEMANTIC_AND_MODEL/SKILL_HARNESS_HERMES_REVIEW.md`

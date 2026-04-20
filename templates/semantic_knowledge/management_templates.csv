@@ -1,0 +1,3 @@
+question_type,typical_prompt,expected_output_sections,preferred_metrics,preferred_grain,notes
+management_report,生成华南区本月经营摘要,"分析范围|经营总览|收入质量|客房效率|利润质量|成本效率|结论","OWNER_PROFIT|TOTAL_INCOME|REVPAR",portfolio,
+driver_analysis,继续展开原因,"分析范围|driver_summary|driver_breakdown|横向对标|建议","OWNER_PROFIT|OPERATING_PROFIT",hotel,

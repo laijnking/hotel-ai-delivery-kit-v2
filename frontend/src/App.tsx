@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { fetchSystemSettings, submitQuery, submitReport } from "./lib/api";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { fetchIntentPreview, fetchSystemSettings, submitQuery, submitReport } from "./lib/api";
 
 type QueryStatus = "idle" | "loading" | "success" | "error";
 type Role = "GROUP_ADMIN" | "AREA_MANAGER" | "HOTEL_MANAGER";
@@ -53,6 +53,22 @@ type QuestionFrame = {
 };
 
 type AnalysisFocus = "driver_analysis" | "management_report" | "yoy_change" | "income_structure" | "profit_cost_efficiency" | null;
+type IntentPreview = {
+  route_mode?: string;
+  needs_clarification?: boolean;
+  clarification_question?: string | null;
+  clarification_options?: string[];
+  summary?: string;
+  preview?: {
+    intent?: string;
+    metric?: string;
+    scope?: string;
+    time_scope?: string;
+    compare_mode?: string;
+    analysis_mode?: string;
+    conversation_action?: string;
+  };
+};
 
 type PromptGroup = {
   title: string;
@@ -503,6 +519,67 @@ function getIntentLabel(result: any) {
 
 function getResultSummary(result: any) {
   return result?.summary || "已完成处理，但暂无摘要。";
+}
+
+function IntentPreviewPanel({
+  preview,
+  loading,
+  onSelectOption,
+}: {
+  preview: IntentPreview | null;
+  loading: boolean;
+  onSelectOption: (value: string) => void;
+}) {
+  if (!loading && !preview) return null;
+  const chips = preview?.preview
+    ? [
+        { label: "动作", value: String(preview.preview.conversation_action || "发起新问题") },
+        { label: "范围", value: String(preview.preview.scope || "当前管理范围") },
+        { label: "指标", value: String(preview.preview.metric || "待识别指标") },
+        { label: "模式", value: String(preview.preview.analysis_mode || "系统判断") },
+      ]
+    : [];
+  const timeScope = String(preview?.preview?.time_scope || "").trim();
+  const compareMode = String(preview?.preview?.compare_mode || "").trim();
+  return (
+    <div className="intent-preview-panel" data-testid="intent-preview-panel">
+      <div className="intent-preview-head">
+        <div>
+          <div className="panel-title">语义预解析</div>
+          <div className="section-desc">
+            {loading ? "小模型正在理解这句话的范围、指标和对话动作。" : preview?.summary || "已生成意图草案。"}
+          </div>
+        </div>
+        {preview?.route_mode ? <span className="source-pill">{preview.route_mode === "fast_llm_parse" ? "小模型解析" : "规则直解"}</span> : null}
+      </div>
+      {chips.length ? (
+        <div className="intent-strip" data-testid="intent-preview-strip">
+          {chips.map((item) => (
+            <div className="intent-chip" key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {timeScope || compareMode ? (
+        <div className="chip-list intent-preview-chip-list">
+          {timeScope ? <span className="chip">{formatTimeScopeLabel(timeScope)}</span> : null}
+          {compareMode ? <span className="chip">{compareMode}</span> : null}
+          {preview?.needs_clarification ? <span className="chip active">需要先确认</span> : null}
+        </div>
+      ) : null}
+      {Array.isArray(preview?.clarification_options) && preview!.clarification_options!.length ? (
+        <div className="chip-list" data-testid="intent-preview-options">
+          {preview!.clarification_options!.map((item) => (
+            <button type="button" className="chip" key={item} onClick={() => onSelectOption(item)}>
+              {item}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function getHighlights(result: any) {
@@ -2168,12 +2245,16 @@ export default function App() {
   const [loadingStep, setLoadingStep] = useState(0);
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [intentPreview, setIntentPreview] = useState<IntentPreview | null>(null);
+  const [intentPreviewLoading, setIntentPreviewLoading] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>(() => restoreConversations());
   const [activeConversationId, setActiveConversationId] = useState<string>(() => {
     if (typeof window === "undefined") return "";
     return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) || "";
   });
   const requestIdRef = useRef(1);
+  const previewRequestIdRef = useRef(0);
+  const deferredQuestion = useDeferredValue(question);
 
   const isLoading = status === "loading";
   const showTechnicalDetails = viewMode === "debug" || role !== "GROUP_ADMIN";
@@ -2241,6 +2322,42 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [isLoading]);
 
+  useEffect(() => {
+    const rawQuestion = deferredQuestion.trim();
+    if (!rawQuestion || isLoading) {
+      setIntentPreview(null);
+      setIntentPreviewLoading(false);
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      const currentPreviewId = ++previewRequestIdRef.current;
+      const rewritten = rewriteFollowUpQuestion(rawQuestion, conversationContext);
+      setIntentPreviewLoading(true);
+      fetchIntentPreview({
+        question: rewritten.rewritten,
+        context: {
+          time_scope: timeScope,
+          language: "zh-CN",
+          analysis_focus: inferAnalysisFocus(rawQuestion, resolveActionMode(rawQuestion, actionMode)),
+          conversation_context: buildSemanticConversationContext(conversationContext),
+        },
+      })
+        .then((result) => {
+          if (currentPreviewId !== previewRequestIdRef.current) return;
+          setIntentPreview(result as IntentPreview);
+        })
+        .catch(() => {
+          if (currentPreviewId !== previewRequestIdRef.current) return;
+          setIntentPreview(null);
+        })
+        .finally(() => {
+          if (currentPreviewId !== previewRequestIdRef.current) return;
+          setIntentPreviewLoading(false);
+        });
+    }, 320);
+    return () => window.clearTimeout(timeoutId);
+  }, [actionMode, conversationContext, deferredQuestion, isLoading, timeScope]);
+
   const placeholder = useMemo(() => {
     if (contextHint) return contextHint;
     return actionMode === "report" ? "例如：生成华南区本月经营摘要" : "例如：为什么某酒店经营利润低于预算？";
@@ -2261,6 +2378,7 @@ export default function App() {
     setSelectedPromptLabel(null);
     setError(null);
     setActiveFrame(null);
+    setIntentPreview(null);
     setStatus("idle");
   }
 
@@ -2271,6 +2389,7 @@ export default function App() {
     setSelectedPromptLabel(null);
     setError(null);
     setActiveFrame(null);
+    setIntentPreview(null);
     if (!isLoading) setStatus("idle");
   }
 
@@ -2305,6 +2424,7 @@ export default function App() {
     setActiveFrame(inferQuestionFrame(finalQuestion, timeScope, effectiveMode, rewritten.usedContext));
     setSelectedPromptLabel(promptLabel);
     setError(null);
+    setIntentPreview(null);
     if (nextQuestion) setQuestion(nextQuestion);
     setContextHint(null);
 
@@ -2613,6 +2733,12 @@ export default function App() {
             </div>
             ) : null}
           </details>
+
+          <IntentPreviewPanel
+            preview={intentPreview}
+            loading={intentPreviewLoading}
+            onSelectOption={(value) => setQuestion(value)}
+          />
 
           <div className="composer">
             <textarea

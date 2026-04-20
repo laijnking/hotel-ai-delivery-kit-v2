@@ -180,7 +180,50 @@ sequenceDiagram
     F-->>U: 展示结果卡片与追问入口
 ```
 
-### 4.1 当前统一响应的关键部分
+### 4.1 当前模型调用策略
+
+当前代码已经不是“前端先固定调用小模型识别意图，再固定调用大模型做深度分析”的串行模式，而是“后端规则优先，模型按需介入”。
+
+关键点：
+
+- 前端只调用统一入口 `/api/v1/ai/query`，不在前端单独做模型意图识别。
+- 首轮意图解析在 `semantic-service`，先做规则解析。
+- 只有规则置信度不足、需要澄清，或 `QWEN_PARSE_POLICY` 明确要求时，才调用快模型 `QWEN_FAST_MODEL`。
+- 数据查询完成后，`explanation-service` 默认先走确定性 explanation。
+- 只有 `QWEN_EXPLANATION_POLICY` 打开，且场景属于 `report`、`explain` 或明确需要深度解释时，才调用深模型 `QWEN_DEEP_MODEL` 做增强。
+
+可以把当前链路理解成：
+
+```mermaid
+flowchart TD
+    U[用户提问] --> F[前端 Chat UI]
+    F --> Q[ai-query-service /api/v1/ai/query]
+
+    Q --> A[auth-service<br/>权限范围]
+    Q --> S[semantic-service<br/>语义解析]
+
+    S --> R[规则解析]
+    R --> D{规则置信度足够?}
+    D -- 是 --> P[parsed_intent + query_plan]
+    D -- 否 --> FM[快模型<br/>QWEN_FAST_MODEL]
+    FM --> P
+
+    P --> M[metric-service<br/>指标定义]
+    P --> SQL[ai-query-service<br/>生成 SQL]
+    SQL --> G[sql-guardrail-service<br/>SQL 安全校验]
+    G --> DB[db-executor-service<br/>查询真实数据]
+
+    DB --> E[explanation-service<br/>确定性分析]
+    E --> X{开启 explanation policy<br/>且场景需要?}
+    X -- 否 --> O[结构化结果]
+    X -- 是 --> DM[深模型<br/>QWEN_DEEP_MODEL]
+    DM --> O
+
+    O --> L[audit-service<br/>审计日志]
+    L --> RES[返回前端 summary / analysis_blocks / parsed_intent]
+```
+
+### 4.2 当前统一响应的关键部分
 
 一般会包含这些字段：
 
@@ -195,6 +238,30 @@ sequenceDiagram
 - `performance`
 
 这意味着当前系统已经不只是“返回 SQL 查询结果”，而是在返回一份包含语义理解、数据事实和展示建议的完整响应对象。
+
+### 4.3 旧认知与当前实际链路对照
+
+历史文档和 README 中仍保留了“快慢双模型分层”的描述，这个方向本身没有错，但需要注意它在当前代码里的落地方式已经调整。
+
+旧认知更接近：
+
+```text
+用户问题 -> 小模型先判意图 -> 大模型再深度分析 -> 返回结果
+```
+
+当前实际代码更接近：
+
+```text
+用户问题
+-> 规则解析
+-> 必要时快模型补充语义
+-> SQL 查询真实数据
+-> 确定性分析生成 explanation
+-> 必要时深模型增强表达
+-> 返回结果
+```
+
+因此，当前系统的主链路不再是“模型串行主导”，而是“规则与真实数据主导，LLM 按需介入”。
 
 ## 5. 数据架构
 

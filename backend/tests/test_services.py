@@ -64,11 +64,16 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertTrue(result["needs_clarification"])
         self.assertTrue(result["clarification_question"])
         self.assertGreaterEqual(len(result["clarification_options"]), 2)
+        self.assertEqual(result["clarification_type"], "missing_scope")
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_parse_hotel_month_business_overview(self):
         req = semantic_main.Req(question="看一下江门嘉华酒店3月的经营情况", time_scope="202601")
-        with patch.object(semantic_main, "call_llm_parse", return_value=None):
+        with patch.object(semantic_main, "should_use_llm_parse", return_value=True), patch.object(
+            semantic_main,
+            "call_llm_parse",
+            return_value={"intent": "query", "metric_code": "OWNER_PROFIT", "compare_mode": "yoy", "requested_hotels": ["江门嘉华"], "confidence": 0.9},
+        ):
             result = semantic_main.parse(req)
         self.assertEqual(result["metric_code"], "OWNER_PROFIT")
         self.assertEqual(result["compare_mode"], "yoy")
@@ -76,6 +81,11 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertEqual(result["requested_hotels"], ["江门嘉华"])
         self.assertEqual(result["skill_id"], "hotel_operation_overview")
         self.assertFalse(result["needs_clarification"])
+        self.assertIn(result["route_mode"], {"deterministic", "fast_llm_parse"})
+        self.assertEqual(result["conversation_action"], "new_query")
+        self.assertIsInstance(result["semantic_notes"], list)
+        self.assertIsInstance(result["semantic_draft"], dict)
+        self.assertEqual(result["semantic_draft"]["source"], "fast_llm")
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_parse_hotel_month_income_situation(self):
@@ -196,6 +206,16 @@ class ServiceSmokeTests(unittest.TestCase):
         self.assertEqual(area_result["requested_areas"], ["海南区"])
         self.assertEqual(hotel_result["requested_hotels"], ["广州丽思卡尔顿公寓"])
         self.assertNotEqual(hotel_result["requested_hotels"], ["广州丽思卡尔顿酒店"])
+
+    @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
+    def test_semantic_resolves_windows_entity_source_from_base_data_dir(self):
+        with workspace_temp_dir() as temp_dir:
+            data_dir = Path(temp_dir)
+            source_file = data_dir / "酒店数据.txt"
+            source_file.write_text("hotelNames酒店名称包括：\n测试酒店\n", encoding="utf-8")
+            with patch.object(semantic_main, "BASE_DATA_DIR", data_dir):
+                resolved = semantic_main.resolve_entity_source("C:/Project/HotelAgent/basedata/酒店数据.txt")
+            self.assertEqual(resolved, source_file)
 
     @unittest.skipIf(semantic_main is None, f"semantic-service deps missing: {semantic_error}")
     def test_semantic_recognizes_business_dimensions(self):
@@ -1461,12 +1481,46 @@ class ServiceSmokeTests(unittest.TestCase):
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_system_settings_exposes_tuning_config(self):
-        result = ai_query_main.system_settings()
+        with patch.dict("os.environ", {}, clear=True):
+            result = ai_query_main.system_settings()
         self.assertIn("quick_questions", result)
         self.assertIn("model_config", result)
         self.assertIn("answer_templates", result)
         self.assertIn("tuning_stages", result)
         self.assertGreaterEqual(len(result["quick_questions"]), 1)
+        runtime = result["model_config"]["runtime"]
+        self.assertEqual(runtime["parse_policy"], "always")
+        self.assertEqual(runtime["explanation_policy"], "auto")
+
+    @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
+    def test_intent_preview_exposes_compact_semantic_summary(self):
+        parsed = {
+            "intent": "query",
+            "metric_code": "TOTAL_INCOME",
+            "compare_mode": "yoy",
+            "time_scope": "202603",
+            "requested_areas": ["华南区"],
+            "requested_hotels": [],
+            "follow_up_mode": "refine_scope",
+            "conversation_action": "refine_scope",
+            "needs_clarification": False,
+            "query_plan": {"analysis_mode": "portfolio_overview", "query_object_label": "华南区"},
+            "parse_debug": {"llm_used": True},
+            "route_mode": "fast_llm_parse",
+            "semantic_notes": ["本轮先由快模型做语义归一化。"],
+            "semantic_draft": {"source": "fast_llm", "raw": {"metric_code": "TOTAL_INCOME"}},
+        }
+        with patch.object(ai_query_main, "request_json", return_value=parsed):
+            result = ai_query_main.intent_preview(
+                ai_query_main.IntentPreviewRequest(question="只看华南区本月收入情况", context=ai_query_main.QueryContext(time_scope="202603"))
+            )
+        self.assertEqual(result["route_mode"], "fast_llm_parse")
+        self.assertFalse(result["needs_clarification"])
+        self.assertEqual(result["preview"]["scope"], "华南区")
+        self.assertEqual(result["preview"]["metric"], "总收入")
+        self.assertEqual(result["preview"]["conversation_action"], "缩小范围")
+        self.assertEqual(result["semantic_notes"], ["本轮先由快模型做语义归一化。"])
+        self.assertEqual(result["parsed_intent"]["semantic_draft"]["source"], "fast_llm")
 
     @unittest.skipIf(ai_query_main is None, f"ai-query-service deps missing: {ai_query_error}")
     def test_learning_inbox_records_actionable_samples(self):

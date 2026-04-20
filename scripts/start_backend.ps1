@@ -20,6 +20,14 @@ foreach ($name in $dbVars) {
     }
 }
 
+if ([string]::IsNullOrWhiteSpace($env:QWEN_PARSE_POLICY)) {
+    $env:QWEN_PARSE_POLICY = "always"
+}
+
+if ([string]::IsNullOrWhiteSpace($env:QWEN_EXPLANATION_POLICY)) {
+    $env:QWEN_EXPLANATION_POLICY = "auto"
+}
+
 $services = @(
     @{ Name = "auth-service"; Port = 8105; Workdir = "backend\\apps\\auth-service" },
     @{ Name = "metric-service"; Port = 8102; Workdir = "backend\\apps\\metric-service" },

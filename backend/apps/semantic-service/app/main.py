@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import csv
 from functools import lru_cache
 from pathlib import Path
 
@@ -19,6 +20,10 @@ CONFIG = Path(__file__).resolve().parents[3] / "configs" / "semantic_mapping.yam
 ENTITY_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "entity_catalog.yaml"
 SKILL_REGISTRY = Path(__file__).resolve().parents[3] / "skills" / "registry.yaml"
 METRIC_BUNDLES_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "metric_bundles.yaml"
+BASE_DATA_DIR = Path(os.getenv("BASE_DATA_DIR", Path(__file__).resolve().parents[5] / "basedata"))
+SEMANTIC_KNOWLEDGE_DIR = Path(
+    os.getenv("SEMANTIC_KNOWLEDGE_DIR", Path(__file__).resolve().parents[4] / "templates" / "semantic_knowledge")
+)
 WAREHOUSE_DIR = Path(os.getenv("WAREHOUSE_DIR", Path(__file__).resolve().parents[3] / "runtime" / "warehouse"))
 DUCKDB_PATH = Path(os.getenv("WAREHOUSE_DUCKDB_PATH", WAREHOUSE_DIR / "hotel_warehouse.duckdb"))
 _SPACE_RE = re.compile(r"\s+")
@@ -85,7 +90,7 @@ LLM_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
 FAST_LLM_MODEL = os.getenv("QWEN_FAST_MODEL", "").strip() or os.getenv("QWEN_MODEL", "").strip()
 DEEP_LLM_MODEL = os.getenv("QWEN_DEEP_MODEL", "").strip() or os.getenv("QWEN_MODEL", "").strip()
 LLM_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "12"))
-LLM_PARSE_POLICY = os.getenv("QWEN_PARSE_POLICY", "auto").strip().lower()
+LLM_PARSE_POLICY = os.getenv("QWEN_PARSE_POLICY", "always").strip().lower()
 LLM_PARSE_CONFIDENCE_THRESHOLD = float(os.getenv("QWEN_PARSE_CONFIDENCE_THRESHOLD", "0.82"))
 _FOLLOW_UP_DRIVER_TERMS = ("原因", "为什么", "归因", "解释", "展开原因")
 _FOLLOW_UP_REFINE_TERMS = ("只看", "仅看", "切到", "改看", "换成", "换到", "聚焦到", "聚焦")
@@ -109,6 +114,10 @@ def health():
         "deep_model": DEEP_LLM_MODEL or None,
         "entity_counts": {name: len(values) for name, values in entity_catalog.items()},
         "runtime_entity_source": runtime_entity_source_available(),
+        "base_data_dir": str(BASE_DATA_DIR),
+        "base_data_available": BASE_DATA_DIR.exists(),
+        "semantic_knowledge_dir": str(SEMANTIC_KNOWLEDGE_DIR),
+        "semantic_knowledge_available": SEMANTIC_KNOWLEDGE_DIR.exists(),
         "skill_count": len(skills),
     }
 
@@ -232,6 +241,132 @@ def _clean_entity_line(line: str, header_prefix: str) -> str:
 
 def runtime_entity_source_available() -> bool:
     return bool(duckdb is not None and DUCKDB_PATH.exists())
+
+
+def resolve_entity_source(source: str) -> Path | None:
+    raw = str(source or "").strip()
+    if not raw:
+        return None
+
+    raw_path = Path(raw).expanduser()
+    candidates: list[Path] = [raw_path]
+    if not raw_path.is_absolute():
+        candidates.append((ENTITY_CONFIG.parent / raw_path).resolve())
+        candidates.append((Path(__file__).resolve().parents[4] / raw_path).resolve())
+    if raw_path.name:
+        candidates.append((BASE_DATA_DIR / raw_path.name).resolve())
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_key = str(candidate)
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        rows: list[dict[str, str]] = []
+        for row in reader:
+            if not isinstance(row, dict):
+                continue
+            rows.append({str(key).strip(): str(value or "").strip() for key, value in row.items() if key})
+        return rows
+
+
+@lru_cache(maxsize=1)
+def load_semantic_metric_templates() -> list[dict[str, str]]:
+    return _read_csv_rows(SEMANTIC_KNOWLEDGE_DIR / "metric_dictionary.csv")
+
+
+@lru_cache(maxsize=1)
+def load_semantic_entity_alias_templates() -> list[dict[str, str]]:
+    return _read_csv_rows(SEMANTIC_KNOWLEDGE_DIR / "entity_aliases.csv")
+
+
+@lru_cache(maxsize=1)
+def load_semantic_hotel_master_templates() -> list[dict[str, str]]:
+    return _read_csv_rows(SEMANTIC_KNOWLEDGE_DIR / "hotel_master.csv")
+
+
+@lru_cache(maxsize=1)
+def load_semantic_department_templates() -> list[dict[str, str]]:
+    return _read_csv_rows(SEMANTIC_KNOWLEDGE_DIR / "department_dictionary.csv")
+
+
+@lru_cache(maxsize=1)
+def load_semantic_account_templates() -> list[dict[str, str]]:
+    return _read_csv_rows(SEMANTIC_KNOWLEDGE_DIR / "account_dictionary.csv")
+
+
+def _template_catalog_values() -> dict[str, list[str]]:
+    catalog: dict[str, list[str]] = {
+        "hotel": [],
+        "area": [],
+        "manage_corp": [],
+        "brand": [],
+        "brand_child": [],
+        "city": [],
+        "builder": [],
+        "brand_level": [],
+        "city_level": [],
+        "department": [],
+        "account": [],
+    }
+
+    def append_unique(entity_name: str, value: str) -> None:
+        item = str(value or "").strip()
+        if item and item not in catalog[entity_name]:
+            catalog[entity_name].append(item)
+
+    for row in load_semantic_hotel_master_templates():
+        if "酒店名称包括" in str(row.get("hotel_name") or ""):
+            continue
+        append_unique("hotel", str(row.get("hotel_name") or ""))
+        append_unique("area", str(row.get("area") or ""))
+        append_unique("manage_corp", str(row.get("manage_corp") or ""))
+        append_unique("brand", str(row.get("brand") or ""))
+        append_unique("brand_child", str(row.get("brand_child") or ""))
+        append_unique("city", str(row.get("city") or ""))
+        append_unique("builder", str(row.get("builder") or ""))
+        append_unique("brand_level", str(row.get("brand_level") or ""))
+        append_unique("city_level", str(row.get("city_level") or ""))
+
+    for row in load_semantic_department_templates():
+        append_unique("department", str(row.get("department_name") or ""))
+
+    for row in load_semantic_account_templates():
+        append_unique("account", str(row.get("account_name") or ""))
+        append_unique("account", str(row.get("level_1") or ""))
+        append_unique("account", str(row.get("level_2") or ""))
+
+    return {key: value for key, value in catalog.items() if value}
+
+
+def _template_scope_graph() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in load_semantic_hotel_master_templates():
+        hotel_name = str(row.get("hotel_name") or "").strip()
+        if not hotel_name or "酒店名称包括" in hotel_name:
+            continue
+        rows.append(
+            {
+                "hotel_name": hotel_name,
+                "area": str(row.get("area") or "").strip(),
+                "manage_corp": str(row.get("manage_corp") or "").strip(),
+                "brand_child": str(row.get("brand_child") or "").strip(),
+                "builder": str(row.get("builder") or "").strip(),
+                "brand_level": str(row.get("brand_level") or "").strip(),
+                "city_level": str(row.get("city_level") or "").strip(),
+            }
+        )
+    return rows
 
 
 def _fetch_runtime_entities() -> dict[str, list[str]]:
@@ -373,23 +508,32 @@ def load_entity_catalog() -> dict[str, list[str]]:
         return {}
 
     runtime_catalog = _fetch_runtime_entities()
+    template_catalog = _template_catalog_values()
     catalog: dict[str, list[str]] = {}
     for entity_name, entity_cfg in entities.items():
         if not isinstance(entity_cfg, dict):
             continue
         values: list[str] = list(runtime_catalog.get(str(entity_name), []))
-        source = Path(str(entity_cfg.get("source", "")).strip())
+        source = resolve_entity_source(str(entity_cfg.get("source", "")).strip())
         header_prefix = str(entity_cfg.get("header_prefix", "")).strip()
-        if source.exists():
+        if source and source.exists():
             with open(source, "r", encoding="utf-8-sig") as file:
                 for raw_line in file:
                     item = _clean_entity_line(raw_line, header_prefix)
                     if item and item not in values:
                         values.append(item)
+        for item in template_catalog.get(str(entity_name), []):
+            if item not in values:
+                values.append(item)
         catalog[str(entity_name)] = values
 
     for entity_name, values in runtime_catalog.items():
         catalog.setdefault(entity_name, values)
+    for entity_name, values in template_catalog.items():
+        catalog.setdefault(entity_name, [])
+        for item in values:
+            if item not in catalog[entity_name]:
+                catalog[entity_name].append(item)
     return catalog
 
 
@@ -419,12 +563,32 @@ def load_entity_aliases() -> dict[str, dict[str, list[str]]]:
                 canonical_map[str(canonical).strip()] = values
         if canonical_map:
             result[str(entity_name).strip()] = canonical_map
+    entity_type_map = {
+        "hotel": "hotel",
+        "area": "area",
+        "brand": "brand",
+        "brand_child": "brand_child",
+        "manage_corp": "manage_corp",
+        "city": "city",
+    }
+    for row in load_semantic_entity_alias_templates():
+        entity_type = entity_type_map.get(str(row.get("entity_type") or "").strip(), "")
+        canonical = str(row.get("canonical_name") or "").strip()
+        alias = str(row.get("alias") or "").strip()
+        if not entity_type or not canonical or not alias:
+            continue
+        result.setdefault(entity_type, {}).setdefault(canonical, [])
+        if alias not in result[entity_type][canonical]:
+            result[entity_type][canonical].append(alias)
     return result
 
 
 @lru_cache(maxsize=1)
 def load_scope_graph() -> list[dict[str, str]]:
-    return _fetch_runtime_scope_graph()
+    graph = _fetch_runtime_scope_graph()
+    if graph:
+        return graph
+    return _template_scope_graph()
 
 
 def entity_alias_norms(entity_name: str, value: str) -> list[str]:
@@ -576,6 +740,14 @@ def extract_metric_code(cfg: dict, question_norm: str) -> tuple[str, str | None]
         metric_code = str(value).strip()
         if metric_code:
             return metric_code, keyword
+
+    for row in load_semantic_metric_templates():
+        metric_code = str(row.get("metric_code") or "").strip()
+        aliases = [item.strip() for item in str(row.get("aliases") or "").split("|") if item.strip()]
+        for alias in aliases:
+            alias_norm = normalize_text(alias)
+            if alias_norm and alias_norm in question_norm and metric_code:
+                return metric_code, alias
 
     if any(normalize_text(term) in question_norm for term in _BUSINESS_OVERVIEW_TERMS) or any(
         normalize_text(term) in question_norm for term in ("经营摘要", "经营总览", "管理摘要")
@@ -1357,6 +1529,13 @@ def parse_llm_json(content: str) -> dict | None:
         data = json.loads(content)
         return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        if fenced:
+            try:
+                data = json.loads(fenced.group(1))
+                return data if isinstance(data, dict) else None
+            except json.JSONDecodeError:
+                pass
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
             return None
@@ -1397,28 +1576,151 @@ def call_llm_json(model: str, system_prompt: str, user_payload: dict) -> dict | 
     return parse_llm_json(content if isinstance(content, str) else json.dumps(content, ensure_ascii=False))
 
 
+def _llm_entity_hints(question: str) -> dict[str, list[str]]:
+    hints: dict[str, list[str]] = {}
+    for entity_name in ("hotel", "area", "brand_child", "manage_corp", "city", "department", "account"):
+        matches = match_catalog_entities(question, entity_name)
+        if matches:
+            hints[entity_name] = matches[:10]
+            continue
+        catalog = load_entity_catalog().get(entity_name, [])
+        if catalog:
+            hints[entity_name] = [str(item).strip() for item in catalog[:8] if str(item).strip()]
+    return hints
+
+
+def _llm_metric_hints() -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for row in load_semantic_metric_templates()[:20]:
+        metric_code = str(row.get("metric_code") or "").strip()
+        if not metric_code:
+            continue
+        items.append(
+            {
+                "metric_code": metric_code,
+                "name_cn": str(row.get("name_cn") or "").strip(),
+                "aliases": [item.strip() for item in str(row.get("aliases") or "").split("|") if item.strip()],
+                "default_compare_mode": str(row.get("default_compare_mode") or "").strip(),
+            }
+        )
+    return items
+
+
+def _llm_parse_user_payload(question: str, time_scope: str, cfg: dict, include_metric_hints: bool = True) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "question": question,
+        "time_scope": time_scope,
+        "allowed_intents": allowed_intents(cfg),
+        "allowed_metrics": allowed_metrics(cfg),
+        "entity_hints": _llm_entity_hints(question),
+        "manage_corp_aliases": load_entity_aliases().get("manage_corp", {}),
+        "output_schema_example": {
+            "intent": "query",
+            "metric_code": "OWNER_PROFIT",
+            "compare_mode": "yoy",
+            "variance_direction": "all",
+            "follow_up_mode": "",
+            "time_scope": time_scope,
+            "requested_areas": [],
+            "requested_hotels": [],
+            "requested_manage_corps": [],
+            "requested_brand_children": [],
+            "requested_builders": [],
+            "requested_brand_levels": [],
+            "requested_city_levels": [],
+            "requested_departments": [],
+            "requested_accounts": [],
+            "confidence": 0.82,
+        },
+    }
+    if include_metric_hints:
+        payload["metric_hints"] = _llm_metric_hints()
+    return payload
+
+
+def normalize_llm_parse_result(llm_result: dict | None, rule_result: dict, cfg: dict, time_scope: str) -> dict | None:
+    if not isinstance(llm_result, dict):
+        return None
+    result = dict(llm_result)
+    result["intent"] = str(result.get("intent") or rule_result.get("intent") or cfg.get("defaults", {}).get("intent", "query")).strip() or "query"
+    if result["intent"] not in allowed_intents(cfg):
+        result["intent"] = str(rule_result.get("intent") or "query").strip() or "query"
+
+    result["metric_code"] = str(result.get("metric_code") or rule_result.get("metric_code") or cfg.get("defaults", {}).get("default_metric_code", "TOTAL_INCOME")).strip() or "TOTAL_INCOME"
+    if result["metric_code"] not in allowed_metrics(cfg):
+        result["metric_code"] = str(rule_result.get("metric_code") or "TOTAL_INCOME").strip() or "TOTAL_INCOME"
+
+    compare_mode = str(result.get("compare_mode") or rule_result.get("compare_mode") or cfg.get("defaults", {}).get("compare_mode", "actual")).strip() or "actual"
+    result["compare_mode"] = compare_mode if compare_mode in {"actual", "budget", "yoy"} else str(rule_result.get("compare_mode") or "actual")
+
+    variance_direction = str(result.get("variance_direction") or rule_result.get("variance_direction") or "all").strip() or "all"
+    result["variance_direction"] = variance_direction if variance_direction in {"below", "above", "all"} else str(rule_result.get("variance_direction") or "all")
+
+    follow_up_mode = str(result.get("follow_up_mode") or "").strip()
+    result["follow_up_mode"] = follow_up_mode if follow_up_mode in {"driver", "refine_scope", "compare_shift", "continue"} else ""
+
+    for list_field in (
+        "requested_areas",
+        "requested_hotels",
+        "requested_manage_corps",
+        "requested_brand_children",
+        "requested_builders",
+        "requested_brand_levels",
+        "requested_city_levels",
+        "requested_departments",
+        "requested_accounts",
+    ):
+        values = result.get(list_field)
+        if isinstance(values, list):
+            cleaned = [str(item).strip() for item in values if str(item).strip()]
+            if list_field == "requested_hotels":
+                cleaned = [clean_hotel_name(item) for item in cleaned if clean_hotel_name(item)]
+            if list_field == "requested_manage_corps":
+                cleaned = [normalize_manage_corp(item) for item in cleaned]
+            result[list_field] = cleaned
+        else:
+            result[list_field] = []
+
+    result["time_scope"] = normalize_time_scope(str(result.get("time_scope") or time_scope), cfg.get("defaults", {}), [], seed_time_scope=time_scope)
+    confidence = result.get("confidence")
+    try:
+        result["confidence"] = max(0.0, min(float(confidence), 0.99))
+    except (TypeError, ValueError):
+        result["confidence"] = float(rule_result.get("confidence", 0.6))
+    return result
+
+
 def call_llm_parse(question: str, time_scope: str, cfg: dict) -> dict | None:
     system_prompt = (
-        "你是酒店经营分析助手的快速语义解析器。"
-        "请把用户问题解析成 JSON，不要输出任何额外文字。"
-        "字段包括 intent, metric_code, compare_mode, variance_direction, requested_areas, requested_hotels, requested_manage_corps, requested_brand_children, requested_builders, requested_brand_levels, requested_city_levels, requested_departments, requested_accounts, confidence。"
-        f"intent 只能是 {allowed_intents(cfg)}。"
-        f"metric_code 只能是 {allowed_metrics(cfg)}。"
-        f"可用业务技能包括 {[skill.get('id') for skill in load_skills()]}，如果命中技能，请严格遵守该技能默认指标和口径。"
-        "compare_mode 只能是 actual, budget, yoy。"
-        "variance_direction 只能是 below, above, all；未达预算、下滑、低于用 below，高于、增长、超过用 above。"
-        "经营情况、经营状况、经营表现这类宽泛问法，默认 metric_code 用 OWNER_PROFIT（NOP业主净利润），intent 用 query。"
-        "收入情况、利润情况、RevPAR情况、怎么样、如何这类问法，如果没有明确同比或预算，compare_mode 默认用 yoy。"
-        "你必须按数据结构输出字段：酒店范围 requested_hotels、区域 requested_areas、管理公司 requested_manage_corps、品牌/子品牌 requested_brand_children、建设来源 requested_builders、品牌档次 requested_brand_levels、城市等级 requested_city_levels、部门 requested_departments、科目 requested_accounts、月份 time_scope、指标 metric_code、口径 compare_mode。"
-        "酒店名称只保留真实酒店名，不要带“看一下、帮我、3月、经营情况”等修饰词。"
-        "如果用户要求摘要、晨报、报告，intent 用 report。"
-        "如果用户追问原因、为什么、归因，intent 用 explain。"
+        "你是酒店经营AI的语义路由器。"
+        "你的任务是把用户问题转成一个JSON对象。"
+        "只能返回JSON对象，不要解释，不要Markdown，不要代码块。"
+        "必须输出全部字段："
+        "intent, metric_code, compare_mode, variance_direction, follow_up_mode, time_scope, "
+        "requested_areas, requested_hotels, requested_manage_corps, requested_brand_children, "
+        "requested_builders, requested_brand_levels, requested_city_levels, requested_departments, "
+        "requested_accounts, confidence。"
+        "未识别时数组字段返回[]，字符串字段返回默认值。"
+        "intent 只能是 query/report/explain/rank。"
+        "compare_mode 只能是 actual/budget/yoy。"
+        "variance_direction 只能是 below/above/all。"
+        "follow_up_mode 只能是 driver/refine_scope/compare_shift/continue，无法判断时返回空字符串。"
+        "经营情况/经营状况/经营表现这类宽泛问法，默认 intent=query, metric_code=OWNER_PROFIT。"
+        "收入情况/利润情况/RevPAR情况/怎么样/如何，如果没有明确同比或预算，默认 compare_mode=yoy。"
+        "酒店名必须尽量从提供的基础主数据中选择最接近的一项，不要带修饰词。"
     )
-    return call_llm_json(
+    raw_result = call_llm_json(
         FAST_LLM_MODEL,
         system_prompt,
-        {"question": question, "time_scope": time_scope},
+        _llm_parse_user_payload(question, time_scope, cfg, include_metric_hints=True),
     )
+    if not raw_result:
+        raw_result = call_llm_json(
+            FAST_LLM_MODEL,
+            system_prompt,
+            _llm_parse_user_payload(question, time_scope, cfg, include_metric_hints=False),
+        )
+    return normalize_llm_parse_result(raw_result, {"intent": "query", "metric_code": "OWNER_PROFIT", "compare_mode": "actual", "variance_direction": "all", "confidence": 0.55}, cfg, time_scope)
 
 
 def build_rule_parse(payload: Req, cfg: dict) -> dict:
@@ -1610,7 +1912,70 @@ def build_rule_parse(payload: Req, cfg: dict) -> dict:
     }
 
 
-def merge_rule_and_llm(rule_result: dict, llm_result: dict | None, cfg: dict) -> dict:
+def build_semantic_draft(rule_result: dict, llm_result: dict | None, cfg: dict) -> dict | None:
+    if not llm_result:
+        return None
+    draft: dict[str, object] = {
+        "source": "fast_llm",
+        "confidence": llm_result.get("confidence"),
+        "raw": llm_result,
+        "candidates": {},
+    }
+    candidates = draft["candidates"] if isinstance(draft.get("candidates"), dict) else {}
+
+    llm_metric = str(llm_result.get("metric_code", "")).strip()
+    llm_intent = str(llm_result.get("intent", "")).strip()
+    llm_compare_mode = str(llm_result.get("compare_mode", "")).strip()
+    llm_variance_direction = str(llm_result.get("variance_direction", "")).strip()
+    llm_follow_up_mode = str(llm_result.get("follow_up_mode", "")).strip()
+
+    if llm_metric:
+        candidates["metric_code"] = {
+            "value": llm_metric,
+            "accepted": llm_metric in allowed_metrics(cfg),
+        }
+    if llm_intent:
+        candidates["intent"] = {
+            "value": llm_intent,
+            "accepted": llm_intent in allowed_intents(cfg),
+        }
+    if llm_compare_mode:
+        candidates["compare_mode"] = {
+            "value": llm_compare_mode,
+            "accepted": llm_compare_mode in {"actual", "budget", "yoy"},
+        }
+    if llm_variance_direction:
+        candidates["variance_direction"] = {
+            "value": llm_variance_direction,
+            "accepted": llm_variance_direction in {"below", "above", "all"},
+        }
+    if llm_follow_up_mode:
+        candidates["follow_up_mode"] = {
+            "value": llm_follow_up_mode,
+            "accepted": llm_follow_up_mode in {"driver", "refine_scope", "compare_shift", "continue"},
+        }
+    for list_field in (
+        "requested_areas",
+        "requested_hotels",
+        "requested_manage_corps",
+        "requested_brand_children",
+        "requested_builders",
+        "requested_brand_levels",
+        "requested_city_levels",
+        "requested_departments",
+        "requested_accounts",
+    ):
+        values = llm_result.get(list_field)
+        if isinstance(values, list) and values:
+            normalized = [str(item).strip() for item in values if str(item).strip()]
+            if normalized:
+                candidates[list_field] = {"value": normalized, "accepted": True}
+    draft["rule_confidence"] = rule_result.get("confidence")
+    return draft
+
+
+def merge_rule_and_llm(rule_result: dict, semantic_draft: dict | None, cfg: dict) -> dict:
+    llm_result = semantic_draft.get("raw") if isinstance(semantic_draft, dict) and isinstance(semantic_draft.get("raw"), dict) else None
     if not llm_result:
         return rule_result
 
@@ -1677,10 +2042,33 @@ def merge_rule_and_llm(rule_result: dict, llm_result: dict | None, cfg: dict) ->
     return merged
 
 
-def should_clarify(result: dict, question: str) -> bool:
+def detect_conversation_action(result: dict, question: str) -> str:
+    follow_up_mode = str(result.get("follow_up_mode") or "").strip()
+    intent = str(result.get("intent") or "").strip()
+    if follow_up_mode == "driver":
+        return "follow_up_continue"
+    if follow_up_mode == "refine_scope":
+        return "refine_scope"
+    if follow_up_mode == "compare_shift":
+        return "shift_compare_mode"
+    if intent == "report":
+        return "management_summary"
+    if has_context_anchor(result) and len(question.strip()) <= 12:
+        return "follow_up_continue"
+    return "new_query"
+
+
+def route_mode(result: dict) -> str:
+    parse_debug = result.get("parse_debug") if isinstance(result.get("parse_debug"), dict) else {}
+    if parse_debug.get("llm_used"):
+        return "fast_llm_parse"
+    return "deterministic"
+
+
+def detect_clarification_type(result: dict, question: str) -> str | None:
     question_text = question.strip()
     if len(question_text) <= 4:
-        return True
+        return "weak_context_anchor" if has_context_anchor(result) else "missing_scope"
     has_scope = bool(
         result.get("requested_areas")
         or result.get("requested_hotels")
@@ -1690,14 +2078,22 @@ def should_clarify(result: dict, question: str) -> bool:
         or result.get("requested_brand_levels")
         or result.get("requested_city_levels")
     )
-    matched_terms = result.get("matched_terms", {})
+    matched_terms = result.get("matched_terms", {}) if isinstance(result.get("matched_terms"), dict) else {}
     has_compare = bool(matched_terms.get("compare"))
     has_business_overview = bool(matched_terms.get("metric") == "经营情况")
     context_anchor = has_context_anchor(result)
     generic_prompt = re.search(r"(看一下|帮我分析|帮我看看|讲讲|说说|汇报一下|分析一下)", question_text)
-    generic_without_scope = generic_prompt is not None and not has_scope and not has_business_overview and not context_anchor
-    metric_only_prompt = bool(matched_terms.get("metric")) and not has_scope and not has_compare and len(question_text) <= 10 and not context_anchor
-    return generic_without_scope or metric_only_prompt
+    if generic_prompt is not None and not has_scope and not has_business_overview and not context_anchor:
+        return "missing_scope"
+    if bool(matched_terms.get("metric")) and not has_scope and not has_compare and len(question_text) <= 10 and not context_anchor:
+        return "missing_scope"
+    if not context_anchor and detect_conversation_action(result, question) != "new_query" and len(question_text) <= 8:
+        return "weak_context_anchor"
+    return None
+
+
+def should_clarify(result: dict, question: str) -> bool:
+    return detect_clarification_type(result, question) is not None
 
 
 def build_clarification_options(result: dict) -> list[str]:
@@ -1713,11 +2109,16 @@ def build_clarification_options(result: dict) -> list[str]:
 
 def build_clarification_prompt(question: str, result: dict) -> dict:
     metric = _METRIC_LABELS.get(str(result.get("metric_code") or ""), "当前指标")
-    scope_hint = "你更想先看区域还是单店？"
-    compare_hint = "要看预算对比，还是同比变化？"
-    message = f"我先快速确认一下：你这次是想看 {metric} 的哪个范围和口径？{scope_hint}{compare_hint}"
+    clarification_type = detect_clarification_type(result, question) or "missing_scope"
+    if clarification_type == "weak_context_anchor":
+        message = "我先确认一下：你这句是在延续上一轮结果，还是想发起一个新的经营问题？"
+    else:
+        scope_hint = "你更想先看区域还是单店？"
+        compare_hint = "要看预算对比，还是同比变化？"
+        message = f"我先快速确认一下：你这次是想看 {metric} 的哪个范围和口径？{scope_hint}{compare_hint}"
     return {
         "needs_clarification": True,
+        "clarification_type": clarification_type,
         "clarification_question": message,
         "clarification_options": build_clarification_options(result),
     }
@@ -1741,6 +2142,31 @@ def has_context_anchor(result: dict) -> bool:
     return any(context.get(key) for key in anchor_keys)
 
 
+def build_semantic_notes(result: dict, question: str) -> list[str]:
+    notes: list[str] = []
+    if route_mode(result) == "fast_llm_parse":
+        notes.append("本轮先由快模型做语义归一化。")
+    else:
+        notes.append("本轮命中确定性规则解析。")
+    conversation_action = detect_conversation_action(result, question)
+    action_notes = {
+        "new_query": "系统判断这是一个新问题。",
+        "follow_up_continue": "系统判断这是在承接上一轮继续追问。",
+        "refine_scope": "系统判断你在收窄分析范围。",
+        "shift_compare_mode": "系统判断你在切换对比口径。",
+        "management_summary": "系统判断你想直接获取经营摘要。",
+    }
+    if conversation_action in action_notes:
+        notes.append(action_notes[conversation_action])
+    if result.get("needs_clarification"):
+        clarification_type = str(result.get("clarification_type") or "").strip()
+        if clarification_type == "weak_context_anchor":
+            notes.append("当前上下文锚点不足，需要先确认承接关系。")
+        else:
+            notes.append("当前信息还不足以稳定落到执行口径，需要先澄清。")
+    return notes
+
+
 @app.post("/api/v1/semantic/parse")
 def parse(payload: Req):
     cfg = load_config()
@@ -1751,7 +2177,8 @@ def parse(payload: Req):
     rule_result = build_rule_parse(payload, cfg)
     use_llm = should_use_llm_parse(rule_result, payload.question)
     llm_result = call_llm_parse(payload.question, rule_result["time_scope"], cfg) if use_llm else None
-    merged = merge_rule_and_llm(rule_result, llm_result, cfg)
+    semantic_draft = build_semantic_draft(rule_result, llm_result, cfg)
+    merged = merge_rule_and_llm(rule_result, semantic_draft, cfg)
     if isinstance(payload.conversation_context, dict) and payload.conversation_context:
         merged["conversation_context"] = payload.conversation_context
     if not use_llm:
@@ -1762,12 +2189,17 @@ def parse(payload: Req):
             "llm_skip_reason": "high_confidence_rule_parse",
             "llm_parse_policy": LLM_PARSE_POLICY,
         }
+    merged["semantic_draft"] = semantic_draft
     merged["resolved_entities"] = build_resolved_entities(payload.question, merged)
     merged["query_plan"] = build_query_plan(payload.question, merged)
     if should_clarify(merged, payload.question):
         merged.update(build_clarification_prompt(payload.question, merged))
     else:
         merged["needs_clarification"] = False
+        merged["clarification_type"] = None
         merged["clarification_question"] = None
         merged["clarification_options"] = []
+    merged["route_mode"] = route_mode(merged)
+    merged["conversation_action"] = detect_conversation_action(merged, payload.question)
+    merged["semantic_notes"] = build_semantic_notes(merged, payload.question)
     return merged

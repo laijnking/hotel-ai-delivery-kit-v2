@@ -18,7 +18,7 @@ LLM_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
 FAST_LLM_MODEL = os.getenv("QWEN_FAST_MODEL", "").strip() or os.getenv("QWEN_MODEL", "").strip()
 DEEP_LLM_MODEL = os.getenv("QWEN_DEEP_MODEL", "").strip() or os.getenv("QWEN_MODEL", "").strip()
 LLM_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "12"))
-LLM_EXPLANATION_POLICY = os.getenv("QWEN_EXPLANATION_POLICY", "off").strip().lower()
+LLM_EXPLANATION_POLICY = os.getenv("QWEN_EXPLANATION_POLICY", "auto").strip().lower()
 
 
 class Req(BaseModel):

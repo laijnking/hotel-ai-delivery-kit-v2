@@ -146,3 +146,43 @@ npx playwright test tests/management-chat.spec.ts
 - 后端 `49` 个测试通过。
 - `npm run build` 通过。
 - `npx playwright test tests/management-chat.spec.ts` 14 项移动端交互测试通过。
+
+## 8. 2026-04-20 补充：前端小模型意图预解析
+
+这一轮补了一层更接近真实对话产品的输入态反馈，不再让用户只有在点击“发送”后才知道系统怎么理解问题。
+
+新增能力：
+
+- 前端输入问题时，先请求轻量 `intent-preview` 接口。
+- 输入框上方展示“语义预解析”卡片。
+- 卡片直接返回：
+  - 当前对话动作
+  - 系统理解的范围
+  - 系统理解的指标
+  - 当前分析模式
+  - 时间与对比口径
+- 如果后端判断需要澄清，预解析卡片会直接展示候选补全选项，用户可以一键点击回填输入框。
+
+这一层的定位不是替代后端正式解析，而是增强用户感知：
+
+- 让用户提前知道系统理解成了什么。
+- 让用户在发送前就能发现范围或指标是否偏了。
+- 让短句追问更像“在和分析师对话”，而不是在填写查询表单。
+
+当前实现边界：
+
+- 前端预解析只做感知增强，不直接替代正式查询接口。
+- 正式执行仍以 `ai-query-service -> semantic-service -> guardrail -> query` 为准。
+- 这样既能提升交互感，又不会让前端模型输出直接影响事实查询。
+
+本轮对应改动：
+
+- [backend/apps/ai-query-service/app/main.py](/root/project/HotelAgent/hotel-ai-delivery-kit-v2/backend/apps/ai-query-service/app/main.py:76)：新增 `/api/v1/ai/intent-preview` 轻量接口。
+- [frontend/src/lib/api.ts](/root/project/HotelAgent/hotel-ai-delivery-kit-v2/frontend/src/lib/api.ts:4)：新增 `fetchIntentPreview()`。
+- [frontend/src/App.tsx](/root/project/HotelAgent/hotel-ai-delivery-kit-v2/frontend/src/App.tsx:56)：新增输入态 `IntentPreviewPanel` 和 debounce 预解析请求。
+- [frontend/src/styles.css](/root/project/HotelAgent/hotel-ai-delivery-kit-v2/frontend/src/styles.css:1621)：新增预解析卡片样式。
+
+本轮验证：
+
+- 后端新增预解析相关单测通过。
+- `npm run build` 通过。

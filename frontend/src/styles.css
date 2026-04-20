@@ -1622,6 +1622,29 @@ button {
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
 }
 
+.intent-preview-panel {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  background:
+    linear-gradient(135deg, rgba(240, 253, 250, 0.95), rgba(255, 251, 235, 0.92)),
+    rgba(255, 255, 255, 0.94);
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.05);
+}
+
+.intent-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.intent-preview-chip-list {
+  margin-top: 0;
+}
+
 .composer-input {
   resize: none;
   min-height: 54px;

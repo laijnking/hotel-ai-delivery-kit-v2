@@ -2,6 +2,7 @@ const defaultApiUrl = "/api/v1/ai/query";
 const API_URL = import.meta.env.VITE_API_URL || defaultApiUrl;
 const REPORT_API_URL = import.meta.env.VITE_REPORT_API_URL || API_URL.replace("/ai/query", "/ai/report");
 const SETTINGS_API_URL = import.meta.env.VITE_SETTINGS_API_URL || API_URL.replace("/ai/query", "/system/settings");
+const INTENT_PREVIEW_API_URL = import.meta.env.VITE_INTENT_PREVIEW_API_URL || API_URL.replace("/ai/query", "/ai/intent-preview");
 const REQUEST_TIMEOUT_MS = 90000;
 
 export class ApiError extends Error {
@@ -120,4 +121,8 @@ export async function submitReport(payload: any) {
 
 export async function fetchSystemSettings() {
   return getJson(SETTINGS_API_URL);
+}
+
+export async function fetchIntentPreview(payload: any) {
+  return requestJson(INTENT_PREVIEW_API_URL, payload);
 }
